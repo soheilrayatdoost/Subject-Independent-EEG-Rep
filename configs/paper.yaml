@@ -1,0 +1,62 @@
+# Hyper-parameters of the ICASSP 2021 paper. Values marked "not in paper" in
+# src/sieeg/config.py are re-implementation choices (see docs/DESIGN.md).
+seed: 0
+features:
+  channels: [Fp1, AF3, F3, F7, FC5, FC1, C3, T7, CP5, CP1, P3, P7, PO3, O1, Oz, Pz, Fp2, AF4, Fz, F4,
+    F8, FC6, FC2, Cz, C4, T8, CP6, CP2, P4, P8, PO4, O2]
+  bands:
+  - [delta, 1.0, 4.0]
+  - [theta, 4.0, 8.0]
+  - [slow_alpha, 8.0, 10.0]
+  - [alpha, 8.0, 12.0]
+  - [beta, 12.0, 30.0]
+  - [gamma, 30.0, 45.0]
+  resample_sfreq: 256.0
+  reference: average
+  l_freq: null
+  h_freq: null
+  welch_segment_sec: 15.0
+  welch_overlap: 0.5
+  min_duration_sec: 5.0
+  montage: standard_1005
+  grid_size: 32
+  interpolation: cubic
+model:
+  conv_blocks:
+  - [16, 16]
+  - [32, 32]
+  kernel_size: 3
+  padding: same
+  conv_activation: relu
+  dense_units: [256, 128]
+  dense_activation: tanh
+  dropout: 0.0
+  classifier_hidden: 64
+  classifier_activation: tanh
+  discriminator_hidden: 64
+  discriminator_activation: elu
+train:
+  epochs: 100
+  batch_size: 32
+  optimizer: nadam_legacy
+  learning_rate: 0.002
+  beta_1: 0.9
+  beta_2: 0.999
+  epsilon: 1.0e-07
+  schedule_decay: 0.004
+  lambda_schedule: constant
+  selection_metric: f1
+  patience: null
+  class_weight: null
+  jit_compile: false
+  verbose: 0
+protocol:
+  label_threshold: 5.0
+  normalization: subject
+  n_val_subjects: 5
+  outgroup_includes_val: false
+  lambda_subject: null
+  lambda_domain: null
+  cross_per_subject: auto
+  jobs: 1
+  subject_probe: false

@@ -1,0 +1,15 @@
+# Tiny settings for a quick end-to-end check on CPU (minutes, not hours).
+# Results are meaningless; use configs/paper.yaml for real experiments.
+seed: 0
+features:
+  resample_sfreq: 128.0
+model:
+  conv_blocks: [[8, 8], [16, 16]]
+  dense_units: [64, 32]
+  classifier_hidden: 16
+  discriminator_hidden: 16
+train:
+  epochs: 3
+  batch_size: 32
+protocol:
+  n_val_subjects: 2

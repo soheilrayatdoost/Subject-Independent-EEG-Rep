@@ -1,0 +1,20 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+.pytest_cache/
+.ipynb_checkpoints/
+.DS_Store
+
+
+# data, features and experiment outputs stay out of git (root-anchored so that
+# the src/sieeg/data and src/sieeg/features packages are NOT ignored)
+/data/
+/features/
+/runs/
+/runs-smoke/
+*.npz
+*.weights.h5

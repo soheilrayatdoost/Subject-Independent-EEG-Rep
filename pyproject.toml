@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sieeg"
+version = "0.1.0"
+description = "Subject-invariant EEG representation learning for emotion recognition (SI-EEG / SIDA-EEG, ICASSP 2021) - TensorFlow 2 re-implementation"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pandas>=2.0",
+    "scikit-learn>=1.3",
+    "mne>=1.6",
+    "tensorflow>=2.16",
+    "keras>=3.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4"]
+plot = ["matplotlib>=3.7"]
+
+[project.scripts]
+sieeg = "sieeg.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra"
+markers = ["slow: trains small models end to end (deselect with -m 'not slow')"]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::FutureWarning",
+]
