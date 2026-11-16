@@ -69,6 +69,17 @@ def test_matches_keras2_nadam_on_a_quadratic(lr):
     assert np.abs(expected[-1] - P0).max() > 10 * lr  # the parameters actually moved
 
 
+def test_builds_without_add_optimizer_variables(monkeypatch):
+    """Keras 3.0-3.9 (allowed by ``keras>=3.0``) lack ``Optimizer.add_optimizer_variables`` (Keras 3.10)."""
+    for cls in LegacyNadam.__mro__:  # simulate them on a newer Keras
+        if "add_optimizer_variables" in vars(cls):
+            monkeypatch.delattr(cls, "add_optimizer_variables")
+    optimizer = make_optimizer(TrainConfig())  # the default optimiser of AdversarialTrainer
+    assert not hasattr(optimizer, "add_optimizer_variables")
+    actual = run_keras(optimizer, quadratic_grad, P0, STEPS)
+    np.testing.assert_allclose(actual, keras2_nadam(quadratic_grad, P0, STEPS, lr=0.002), rtol=1e-5, atol=1e-7)
+
+
 def test_momentum_products_are_kept_per_variable():
     """Two variables updated together follow the same per-variable Keras-2 trajectories."""
     optimizer = LegacyNadam(learning_rate=0.05)

@@ -7,7 +7,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-from sieeg.utils import natural_key, natural_sorted, qualify
+import pytest
+
+from sieeg.utils import check_dataset_name, natural_key, natural_sorted, qualify
 
 SRC = str(Path(__file__).resolve().parents[1] / "src")
 #: Ids that tie under natural_key ("1" / "01", "P1" / "p1"): the raw text must break the tie.
@@ -51,3 +53,15 @@ def test_natural_sorted_is_independent_of_the_string_hash_seed():
 def test_qualify():
     assert qualify("mahnob", "12") == "mahnob:12"
     assert qualify("daief", "12") != qualify("mahnob", "12")
+
+
+def test_qualified_ids_cannot_collide_because_dataset_names_have_no_colon():
+    """("a", "b:c") and ("a:b", "c") would both give "a:b:c": only subject ids may contain ':'."""
+    assert qualify("a", "b:c") == "a:b:c"
+    assert qualify("a", "b:c").split(":", 1) == ["a", "b:c"]  # the first colon ends the dataset name
+    with pytest.raises(ValueError, match=r"Dataset name 'a:b' contains ':'.*use e\.g\. 'a-b'"):
+        qualify("a:b", "c")
+    assert check_dataset_name("dai-ef") == "dai-ef"
+    assert check_dataset_name(2021) == "2021"  # Trial and FeatureSet store the name as a string
+    with pytest.raises(ValueError, match=r"Dataset name ':' contains ':'"):
+        check_dataset_name(":")

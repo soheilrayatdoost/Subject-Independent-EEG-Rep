@@ -70,6 +70,22 @@ def test_subject_ids_and_qualified_subjects():
     assert fs.qualified_subjects.tolist() == ["mahnob:10", "mahnob:2", "mahnob:10", "mahnob:1"]
 
 
+def test_dataset_names_cannot_contain_a_colon_but_subject_ids_can(tmp_path):
+    """':' separates dataset and subject in qualified ids, so ("a:b", "c") would merge with ("a", "b:c")."""
+    with pytest.raises(ValueError, match=r"Dataset name 'a:b' contains ':'"):
+        _featureset(dataset="a:b")
+    fs_a = FeatureSet("a", np.zeros((2, 3, 2)), ["b:c", "b:c"], ["1", "2"], [5, 5], [5, 5], CHANNELS, BANDS)
+    fs_b = FeatureSet("a-b", np.zeros((2, 3, 2)), ["c", "c"], ["1", "2"], [5, 5], [5, 5], CHANNELS, BANDS)
+    assert fs_a.qualified_subjects.tolist() == ["a:b:c", "a:b:c"]
+    assert set(fs_a.qualified_subjects).isdisjoint(fs_b.qualified_subjects)
+    path = fs_a.save(tmp_path / "f.npz")  # a file written before the rule: load validates the name too
+    with np.load(path) as z:
+        fields = {key: z[key] for key in z.files}
+    np.savez(path, **(fields | {"dataset": np.array("a:b")}))
+    with pytest.raises(ValueError, match=r"Dataset name 'a:b' contains ':'"):
+        FeatureSet.load(path)
+
+
 # ------------------------------------------------------------------ selection
 def test_subset_by_mask_indices_and_slice_copies_meta():
     fs = _featureset(meta={"source": "unit"})

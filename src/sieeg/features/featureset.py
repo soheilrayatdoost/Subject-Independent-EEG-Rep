@@ -16,7 +16,7 @@ from typing import Any
 
 import numpy as np
 
-from ..utils import natural_sorted, qualify
+from ..utils import check_dataset_name, natural_sorted, qualify
 
 FORMAT_VERSION = 1
 LABELS = ("valence", "arousal")
@@ -70,7 +70,8 @@ class FeatureSet:
     """Log band power of every trial in one dataset.
 
     Attributes:
-        dataset: dataset name (``"mahnob"``, ``"daief"``, ...).
+        dataset: dataset name (``"mahnob"``, ``"daief"``, ...); no ``":"``, so that
+            :attr:`qualified_subjects` are unique (:func:`~sieeg.utils.check_dataset_name`).
         band_power: float32 array ``(n_trials, n_channels, n_bands)`` of log10 band power.
         subjects, trials: string arrays ``(n_trials,)``.
         valence, arousal: float32 ratings ``(n_trials,)``, NaN when missing.
@@ -90,7 +91,7 @@ class FeatureSet:
     meta: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        self.dataset = str(self.dataset)
+        self.dataset = check_dataset_name(self.dataset)
         self.band_power = np.asarray(self.band_power, dtype=np.float32)
         self.subjects = np.asarray(self.subjects).astype(str)
         self.trials = np.asarray(self.trials).astype(str)
@@ -133,7 +134,7 @@ class FeatureSet:
 
     @property
     def qualified_subjects(self) -> np.ndarray:
-        """``"<dataset>:<subject>"`` per trial (unique across datasets)."""
+        """``"<dataset>:<subject>"`` per trial, unique across datasets (:func:`~sieeg.utils.qualify`)."""
         return np.array([qualify(self.dataset, s) for s in self.subjects])
 
     def __repr__(self) -> str:

@@ -39,7 +39,8 @@ def welch_psd(
     """
     data = np.asarray(data, dtype=np.float64)
     nperseg = min(int(round(segment_sec * sfreq)), data.shape[-1])
-    noverlap = int(round(nperseg * overlap))
+    # Rounding can reach nperseg for an overlap close to 1 on a short trial; scipy requires fewer.
+    noverlap = min(int(round(nperseg * overlap)), max(nperseg - 1, 0))
     return signal.welch(
         data,
         fs=sfreq,

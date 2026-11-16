@@ -8,6 +8,8 @@ from typing import Any
 
 import numpy as np
 
+from ..utils import check_dataset_name
+
 
 def _as_rating(value: Any) -> float:
     if value is None:
@@ -23,7 +25,8 @@ class Trial:
     """One stimulus-locked EEG recording.
 
     Attributes:
-        dataset: short dataset name, e.g. ``"mahnob"`` or ``"daief"``.
+        dataset: short dataset name, e.g. ``"mahnob"`` or ``"daief"``; no ``":"``, which separates
+            dataset and subject in qualified subject ids (:func:`~sieeg.utils.check_dataset_name`).
         subject: subject id within the dataset (string).
         trial: trial / session id within the subject (string).
         data: EEG in volts, shape ``(n_channels, n_times)``, already cropped to the stimulus.
@@ -44,7 +47,7 @@ class Trial:
     meta: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        self.dataset = str(self.dataset)
+        self.dataset = check_dataset_name(self.dataset)
         self.subject = str(self.subject)
         self.trial = str(self.trial)
         self.data = np.asarray(self.data, dtype=np.float64)

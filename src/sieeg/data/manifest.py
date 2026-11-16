@@ -18,9 +18,11 @@ Required columns: ``subject, trial, path, valence, arousal``. Optional columns:
 Column names are exact, because an optional column that is not found silently falls back
 to its default (the whole file, no scaling): a known column in another case or spelling
 (``Tmin``, ``Scale``, ``array key``) or a common alias (``onset``, ``fs``, ``channels`` ...)
-is an error naming the expected column. Other columns are ignored with one warning.
-Whitespace around header names and text cells (``subject``, ``trial``, ``path``, ...) is
-removed. An empty rating cell means "not rated"; any other non-numeric rating is an error.
+is an error naming the expected column, and so is a name given twice. Other columns are
+ignored with one warning. Whitespace around header names and text cells (``subject``,
+``trial``, ``path``, ...) is removed; text cells are otherwise literal (``NA`` or ``None`` is
+an id) and only an empty one is missing. An empty rating cell means "not rated"; any other
+non-numeric rating is an error.
 
 Relative paths are relative to the manifest's folder. Several rows may share one file.
 """
@@ -29,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -37,6 +40,7 @@ import numpy as np
 import pandas as pd
 import scipy.io
 
+from ..utils import check_dataset_name
 from .trial import Trial
 
 if TYPE_CHECKING:
@@ -55,17 +59,22 @@ COLUMN_ALIASES = {
     "channels": "ch_names",
 }
 ARRAY_SUFFIXES = (".npy", ".npz", ".mat")
-_TEXT_COLUMNS = ("subject", "trial", "path", "ch_names", "array_key")  # read as strings ("01" stays "01")
+_TEXT_COLUMNS = ("subject", "trial", "path", "ch_names", "array_key")  # read literally ("01", "NA" are ids)
 _RATING_COLUMNS = ("valence", "arousal")
 _FILE_EXTRAS = ("sfreq", "ch_names")  # metadata stored next to the EEG in .npz / .mat files
 _TRUE, _FALSE = ("1", "true", "yes"), ("0", "false", "no")
 
 
-def _check_columns(columns: Sequence[str], source: object) -> None:
-    """Reject duplicate, misspelled and aliased column names; log the other unknown ones once."""
-    duplicates = sorted({c for c in columns if list(columns).count(c) > 1})
+def _check_unique(names: Sequence[str], source: object) -> None:
+    """Reject a column name given more than once."""
+    duplicates = sorted(name for name, count in Counter(names).items() if count > 1)
     if duplicates:
         raise ValueError(f"Manifest {source}: duplicate column(s) {duplicates}")
+
+
+def _check_columns(columns: Sequence[str], source: object) -> None:
+    """Reject duplicate, misspelled and aliased column names; log the other unknown ones once."""
+    _check_unique(columns, source)
     known = REQUIRED_COLUMNS + OPTIONAL_COLUMNS
     wrong, ignored = [], []
     for name in columns:
@@ -132,17 +141,27 @@ def _check_manifest(df: pd.DataFrame, source: object) -> pd.DataFrame:
     return df
 
 
+def _header(path: Path) -> list[str]:
+    """The header row as written; as column names, pandas renames a repeat (``tmin``, ``tmin.1``)
+    and an empty name (``Unnamed: 5``)."""
+    first = pd.read_csv(path, header=None, nrows=1, dtype=str, keep_default_na=False, skipinitialspace=True)
+    return [str(name) for name in first.iloc[0]]
+
+
 def read_manifest(path: str | Path) -> pd.DataFrame:
     """Read and validate a manifest CSV, keeping row order; ``path`` values become absolute.
 
     Raises:
-        ValueError: for a missing required column, a misspelled or aliased known column, a
-            row without subject, trial or path, or a non-numeric rating.
+        ValueError: for a missing required column, a repeated column name, a misspelled or
+            aliased known column, a row without subject, trial or path, or a non-numeric rating.
     """
     path = Path(path)
-    header = pd.read_csv(path, nrows=0, skipinitialspace=True).columns  # text columns by their stripped names
-    text = {c: str for c in header if str(c).strip() in _TEXT_COLUMNS}
-    df = _check_manifest(pd.read_csv(path, dtype=text, skipinitialspace=True), path)
+    header = _header(path)
+    _check_unique([name.strip() for name in header if name.strip()], path)  # so pandas renames no named column
+    # A converter keeps a text cell as written, so "NA" or "None" is an id (the python parser would
+    # still make it NaN); the other columns keep pandas' missing values.
+    literal = dict.fromkeys((name for name in header if name.strip() in _TEXT_COLUMNS), str)
+    df = _check_manifest(pd.read_csv(path, converters=literal, skipinitialspace=True, engine="c"), path)
     base = path.resolve().parent
     df["path"] = [str(base / p) for p in df["path"]]  # an absolute p replaces base
     return df
@@ -343,6 +362,7 @@ def iter_manifest_trials(
     """
     if on_error not in ("warn", "raise"):
         raise ValueError(f"on_error must be 'warn' or 'raise', got {on_error!r}")
+    dataset = check_dataset_name(dataset)  # a configuration error, not a failing row: before any file is read
     if isinstance(manifest, pd.DataFrame):
         df = _check_manifest(manifest, "(DataFrame)")
     else:

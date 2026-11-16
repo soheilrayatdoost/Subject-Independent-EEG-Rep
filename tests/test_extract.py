@@ -18,13 +18,16 @@ from sieeg.features.psd import band_log_power, welch_psd
 CHANNELS = list(BIOSEMI32_CHANNELS)
 
 
-def _trial(ch_names, rng, *, sfreq=256.0, seconds=8.0, sine_hz=()) -> Trial:
-    """10 uV white noise per channel plus 20 uV sines shared by all channels."""
+def _trial(ch_names, rng, *, sfreq=256.0, seconds=8.0, sine_hz=(), dataset="toy") -> Trial:
+    """10 uV white noise per channel plus 20 uV sines shared by all channels.
+
+    ``dataset="synthetic"`` lets it join the ``raw_trials`` fixture in one extraction (one dataset per extraction).
+    """
     t = np.arange(int(seconds * sfreq)) / sfreq
     data = 10e-6 * rng.standard_normal((len(ch_names), t.size))
     for f in sine_hz:
         data += 20e-6 * np.sin(2 * np.pi * f * t)
-    return Trial("toy", "1", "1", data, sfreq, list(ch_names), valence=7, arousal=3, meta={"source": "unit"})
+    return Trial(dataset, "1", "1", data, sfreq, list(ch_names), valence=7, arousal=3, meta={"source": "unit"})
 
 
 def _corr(a: np.ndarray, b: np.ndarray) -> float:
@@ -168,6 +171,33 @@ def test_dataset_name_can_be_overridden(raw_trials):
     assert len(fs) == 2
 
 
+def test_trials_of_two_datasets_are_rejected(raw_trials):
+    """Subject ids repeat across databases (S01 in both), so one feature file would merge two people."""
+    other = [dataclasses.replace(t, dataset="other") for t in raw_trials[:2]]
+    too_short = dataclasses.replace(other[0], trial="short", data=other[0].data[:, :128])  # rejected, not skipped
+    for mixed, trial in (([*raw_trials, *other], "T01"), ([*raw_trials, too_short], "short")):
+        message = f"^other subject S01 trial {trial} follows trials of dataset synthetic: subject ids are unique"
+        for kwargs in ({}, {"dataset": "renamed"}, {"on_error": "raise"}):
+            with pytest.raises(ValueError, match=message):
+                extract_features(mixed, FeatureConfig(), progress=False, **kwargs)
+
+
+def test_dataset_names_cannot_contain_a_colon(raw_trials):
+    """':' separates dataset and subject in qualified subject ids (sieeg.utils.qualify); subject ids may hold it."""
+    with pytest.raises(ValueError, match=r"Dataset name 'a:b' contains ':'"):
+        dataclasses.replace(raw_trials[0], dataset="a:b")
+    assert dataclasses.replace(raw_trials[0], subject="b:c").subject == "b:c"
+    read = []
+
+    def trials():
+        read.append(True)
+        yield from raw_trials
+
+    with pytest.raises(ValueError, match=r"Dataset name 'a:b' contains ':'"):
+        extract_features(trials(), FeatureConfig(), dataset="a:b", progress=False)
+    assert read == []  # a configuration error: no trial was read
+
+
 def test_nothing_extracted_raises(raw_trials):
     short = dataclasses.replace(raw_trials[0], data=raw_trials[0].data[:, :128])
     with pytest.raises(ValueError, match="No features"):
@@ -223,11 +253,31 @@ def test_bands_above_nyquist_are_rejected(raw_trials, rng):
         extract_features(trials(), FeatureConfig(resample_sfreq=64.0), progress=False)
     assert read == []  # a configuration error: no trial was read
 
-    slow = _trial(CHANNELS, rng, sfreq=64.0, seconds=20.0)  # no resampling: the native rate is too low
+    slow = _trial(CHANNELS, rng, sfreq=64.0, seconds=20.0, dataset="synthetic")  # no resampling: 64 Hz is too low
     with pytest.raises(ValueError, match="'gamma'.*Nyquist"):
         trial_band_power(slow, FeatureConfig(resample_sfreq=None))
     fs = extract_features([*raw_trials, slow], FeatureConfig(resample_sfreq=None), progress=False)
     assert len(fs) == 6
     [record] = fs.meta["skipped"]
     assert record["reason"].startswith("ValueError: Band(s) 'gamma'")
+    with pytest.raises(ValueError, match=r"Nyquist frequency \(32 Hz\) of a 64 Hz signal"):
+        trial_band_power(raw_trials[0], FeatureConfig(resample_sfreq=64.0))  # 128 Hz recording resampled to 64 Hz
     assert trial_band_power(raw_trials[0], FeatureConfig(resample_sfreq=90.0)).shape == (32, 6)  # 45 Hz = Nyquist
+
+
+def test_bands_above_the_recorded_nyquist_frequency_are_rejected_after_upsampling(raw_trials, rng):
+    """Upsampling a 64 Hz recording to 256 Hz cannot restore 32-45 Hz: gamma would measure the resampler."""
+    cfg = FeatureConfig()  # resample_sfreq 256 Hz, gamma 30-45 Hz
+    slow = _trial(CHANNELS, rng, sfreq=64.0, seconds=20.0, dataset="synthetic")
+    message = (r"'gamma' \[30, 45\) Hz reach above the Nyquist frequency \(32 Hz\) of synthetic subject 1 trial 1, "
+               "recorded at 64 Hz; resampling cannot add")
+    with pytest.raises(ValueError, match=message):
+        trial_band_power(slow, cfg)
+    fs = extract_features([*raw_trials, slow], cfg, progress=False)  # raw_trials: 128 Hz, upsampled too
+    assert len(fs) == 6
+    [record] = fs.meta["skipped"]
+    assert record["reason"].startswith("ValueError: Band(s) 'gamma'") and "recorded at 64 Hz" in record["reason"]
+    with pytest.raises(ValueError, match=message):
+        extract_features([*raw_trials, slow], cfg, on_error="raise", progress=False)
+    at_limit = _trial(CHANNELS, rng, sfreq=90.0, seconds=20.0)  # 45 Hz = the recording's Nyquist frequency
+    assert trial_band_power(at_limit, cfg).shape == (32, 6)

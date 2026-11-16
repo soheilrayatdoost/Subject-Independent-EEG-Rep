@@ -7,14 +7,16 @@ Configs are plain dataclasses that round-trip through YAML::
     cfg = load_config("configs/paper.yaml", overrides=["train.epochs=5"])
     save_config(cfg, "runs/x/config.yaml")
 
-Values read from YAML or ``--set`` overrides are checked against the field types, ranges
-and choices (:func:`validate_config`); an invalid value or a YAML syntax error is a
-``ValueError`` that names the key or the file, and an unknown key is a ``KeyError``.
+Values read from YAML or ``--set`` overrides are checked against the field types (numbers
+must be finite), ranges and choices (:func:`validate_config`); an invalid value or a YAML
+syntax error is a ``ValueError`` that names the key or the file, and an unknown key is a
+``KeyError``.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import math
 import types
 import typing
 from collections.abc import Iterable, Iterator, Mapping
@@ -139,17 +141,43 @@ CHOICES: dict[str, tuple[str | None, ...]] = {
     "protocol.normalization": ("subject", "none"),
     "protocol.cross_per_subject": ("auto", "always", "never"),
 }
-#: Smallest allowed value of integer keys.
-MINIMUMS: dict[str, int] = {"train.epochs": 1, "train.batch_size": 1, "protocol.n_val_subjects": 0, "protocol.jobs": 1}
+#: Smallest allowed value of number keys; for a list key, of every number in it.
+MINIMUMS: dict[str, float] = {
+    "seed": 0,
+    "features.l_freq": 0,  # 0 = no high-pass (MNE)
+    "model.conv_blocks": 1,  # filters of every convolution
+    "model.kernel_size": 1,
+    "model.dense_units": 1,
+    "model.classifier_hidden": 0,  # 0 = linear read-out
+    "model.discriminator_hidden": 0,
+    "train.epochs": 1,
+    "train.batch_size": 1,
+    "train.schedule_decay": 0,
+    "protocol.n_val_subjects": 0,
+    "protocol.jobs": 1,
+    "protocol.lambda_subject": 0,
+    "protocol.lambda_domain": 0,
+}
+#: Number keys that must be > 0.
+POSITIVE: tuple[str, ...] = (
+    "features.resample_sfreq",
+    "features.h_freq",
+    "features.welch_segment_sec",
+    "train.learning_rate",
+    "train.epsilon",
+)
+#: Number keys that must lie in [0, 1).
+FRACTIONS: tuple[str, ...] = ("features.welch_overlap", "model.dropout", "train.beta_1", "train.beta_2")
 
-_SCALARS = {bool: "true or false", int: "an integer", float: "a number", str: "a string"}
+_SCALARS = {bool: "true or false", int: "an integer", float: "a finite number", str: "a string"}
 
 
-def _convert(value: Any, hint: Any, key: str, *, optional: bool = False) -> Any:
+def _convert(value: Any, hint: Any, key: str, *, numeric_strings: bool, optional: bool = False) -> Any:
     """``value`` checked against the field type ``hint``; lists become tuples and integers floats.
 
-    A field annotated ``X | None`` also accepts ``None``. A number field accepts a numeric
-    string, because PyYAML reads ``1e-3`` (no decimal point) as a string.
+    A field annotated ``X | None`` also accepts ``None``; a number field takes finite numbers
+    only. With ``numeric_strings`` (values read from YAML) a number field also accepts a
+    numeric string, because PyYAML reads ``1e-3`` (no decimal point) as a string.
 
     Raises:
         ValueError: naming ``key`` if ``value`` does not have the field's type.
@@ -159,29 +187,53 @@ def _convert(value: Any, hint: Any, key: str, *, optional: bool = False) -> Any:
         if value is None and type(None) in args:
             return None
         (inner,) = [arg for arg in args if arg is not type(None)]
-        return _convert(value, inner, key, optional=True)
+        return _convert(value, inner, key, numeric_strings=numeric_strings, optional=True)
     null = " or null" if optional else ""
     if origin is tuple:
         if not isinstance(value, (list, tuple)):
             raise ValueError(f"{key} must be a list{null}, got {value!r}")
         if len(args) == 2 and args[1] is Ellipsis:
-            return tuple(_convert(item, args[0], f"{key}[{i}]") for i, item in enumerate(value))
-        if len(value) != len(args):
+            args = (args[0],) * len(value)
+        elif len(value) != len(args):
             raise ValueError(f"{key} must be a list of {len(args)} items, got {value!r}")
-        return tuple(_convert(item, arg, f"{key}[{i}]") for i, (item, arg) in enumerate(zip(value, args)))
+        return tuple(
+            _convert(item, arg, f"{key}[{i}]", numeric_strings=numeric_strings)
+            for i, (item, arg) in enumerate(zip(value, args))
+        )
     if hint is bool or isinstance(value, bool):  # bool is a subclass of int
         if hint is bool and isinstance(value, bool):
             return value
-    elif hint is float and isinstance(value, (int, float)):
-        return float(value)
-    elif hint is float and isinstance(value, str):
+    elif hint is float and (isinstance(value, (int, float)) or (numeric_strings and isinstance(value, str))):
         try:
-            return float(value)
-        except ValueError:
-            pass
+            number = float(value)
+        except (ValueError, OverflowError):  # not a numeric string, or an integer beyond the float range
+            number = math.nan
+        if math.isfinite(number):
+            return number
     elif isinstance(value, hint):
         return value
     raise ValueError(f"{key} must be {_SCALARS[hint]}{null}, got {value!r}")
+
+
+def _numbers(value: Any, key: str) -> Iterator[tuple[str, float]]:
+    """``(key, value)`` for a number; for a (nested) tuple, ``(key[i]..., number)`` of every number in it."""
+    if isinstance(value, tuple):
+        for i, item in enumerate(value):
+            yield from _numbers(item, f"{key}[{i}]")
+    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        yield key, value
+
+
+def _min_grid_size(model: ModelConfig) -> int:
+    """Smallest image side that leaves :func:`~sieeg.models.networks.build_encoder` a non-empty feature map.
+
+    Every conv block ends with a 2x2 max-pooling, and a ``'valid'`` convolution trims
+    ``kernel_size - 1`` pixels.
+    """
+    side = 1
+    for block in reversed(model.conv_blocks):
+        side = 2 * side + (len(block) * (model.kernel_size - 1) if model.padding == "valid" else 0)
+    return side
 
 
 def _leaves(cfg: Any, prefix: str = "") -> Iterator[tuple[str, Any, Any]]:
@@ -196,18 +248,37 @@ def _leaves(cfg: Any, prefix: str = "") -> Iterator[tuple[str, Any, Any]]:
 
 
 def validate_config(cfg: ExperimentConfig) -> ExperimentConfig:
-    """Check every value of ``cfg``: its field type, :data:`MINIMUMS` and :data:`CHOICES`.
+    """Check every value of ``cfg``: its field type, the ranges and the choices.
 
-    Returns ``cfg`` unchanged. Raises ``ValueError`` naming the first invalid key, e.g.
-    ``train.epochs must be >= 1, got 0``.
+    Numbers must be finite and within :data:`MINIMUMS`, :data:`POSITIVE` and :data:`FRACTIONS`,
+    options among :data:`CHOICES`; every band needs ``0 <= low < high``, and ``features.grid_size``
+    must leave the encoder a non-empty feature map. Unlike a YAML file, a configuration built in
+    Python must not give a number as a string (``welch_segment_sec="15"``); integers for floats
+    and lists for tuples are fine. Returns ``cfg`` unchanged. Raises ``ValueError`` naming the
+    first invalid key, e.g. ``train.epochs must be >= 1, got 0``.
     """
     for key, value, hint in _leaves(cfg):
-        _convert(value, hint, key)
-        if key in MINIMUMS and value < MINIMUMS[key]:
-            raise ValueError(f"{key} must be >= {MINIMUMS[key]}, got {value!r}")
+        value = _convert(value, hint, key, numeric_strings=False)
+        for name, number in _numbers(value, key):
+            if key in MINIMUMS and number < MINIMUMS[key]:
+                raise ValueError(f"{name} must be >= {MINIMUMS[key]}, got {number!r}")
+            if key in POSITIVE and number <= 0:
+                raise ValueError(f"{name} must be > 0, got {number!r}")
+            if key in FRACTIONS and not 0 <= number < 1:
+                raise ValueError(f"{name} must be in [0, 1), got {number!r}")
         if key in CHOICES and value not in CHOICES[key]:
             allowed = ", ".join("null" if choice is None else choice for choice in CHOICES[key])
             raise ValueError(f"{key} must be one of: {allowed}; got {value!r}")
+        if key == "features.bands":
+            for i, band in enumerate(value):
+                if not 0 <= band[1] < band[2]:
+                    raise ValueError(f"{key}[{i}] must have 0 <= low < high, got {band!r}")
+    smallest = _min_grid_size(cfg.model)
+    if cfg.features.grid_size < smallest:
+        raise ValueError(
+            f"features.grid_size must be >= {smallest}, got {cfg.features.grid_size}: smaller images leave the "
+            "encoder (model.conv_blocks, kernel_size, padding) an empty feature map"
+        )
     return cfg
 
 
@@ -240,7 +311,7 @@ def _from_dict(cls: type, data: Any, prefix: str = "") -> Any:
         if dataclasses.is_dataclass(default):
             kwargs[key] = _from_dict(type(default), value, f"{prefix}{key}.")
         else:
-            kwargs[key] = _convert(value, hints[key], f"{prefix}{key}")
+            kwargs[key] = _convert(value, hints[key], f"{prefix}{key}", numeric_strings=True)
     return cls(**kwargs)
 
 

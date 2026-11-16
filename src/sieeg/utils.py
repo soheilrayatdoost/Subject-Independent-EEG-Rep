@@ -23,6 +23,32 @@ def natural_sorted(items: Iterable[str]) -> list[str]:
     return sorted({str(i) for i in items}, key=lambda s: (natural_key(s), s))
 
 
+def check_dataset_name(dataset: str) -> str:
+    """``dataset`` as a string, if it can name a database: it must not contain ``":"``.
+
+    ``":"`` ends the dataset name in the ids of :func:`qualify`. Subject ids may contain it, so
+    the ids are unambiguous only if dataset names never do: ``qualify("a:b", "c")`` would equal
+    ``qualify("a", "b:c")``.
+
+    Raises:
+        ValueError: naming the dataset.
+    """
+    name = str(dataset)
+    if ":" in name:
+        raise ValueError(
+            f"Dataset name {name!r} contains ':', which separates dataset and subject in qualified subject ids; "
+            f"use e.g. {name.replace(':', '-')!r}"
+        )
+    return name
+
+
 def qualify(dataset: str, subject: str) -> str:
-    """Globally unique subject id across datasets, e.g. ``"mahnob:12"``."""
-    return f"{dataset}:{subject}"
+    """Globally unique subject id across datasets, e.g. ``"mahnob:12"``.
+
+    Dataset names contain no ``":"`` (:func:`check_dataset_name`) while subject ids may, so the id
+    splits back into ``(dataset, subject)`` at its first colon and distinct pairs never collide.
+
+    Raises:
+        ValueError: if ``dataset`` contains ``":"``.
+    """
+    return f"{check_dataset_name(dataset)}:{subject}"

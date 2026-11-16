@@ -58,7 +58,7 @@ sieeg report runs-smoke --reference si_eeg,sida_eeg
 `sieeg extract` reads the raw EEG once and writes one `.npz` feature file per database: the log10 band power of every trial (32 channels x 6 bands, one sample per trial), with subject ids, trial ids and ratings.
 All experiments start from these files.
 Each trial is re-referenced to the average of the 32 channels and resampled to 256 Hz; its Welch PSD (15 s Hann segments, 50 % overlap) is averaged within delta (1-4 Hz), theta (4-8 Hz), slow alpha (8-10 Hz), alpha (8-12 Hz), beta (12-30 Hz) and gamma (30-45 Hz), and the log10 of each band mean is the feature.
-Every band must lie below the Nyquist frequency of the resampled signal: a `features.resample_sfreq` below twice the highest band edge (90 Hz for gamma at 30-45 Hz) is an error.
+Every band must lie below the Nyquist frequency of the resampled signal and of the recording: a `features.resample_sfreq` below twice the highest band edge (90 Hz for gamma at 30-45 Hz) is an error, and a trial recorded below that rate is skipped with a warning and listed as skipped in the feature file, because upsampling cannot restore frequencies the recording lacks.
 Trials the loaders drop (missing file, crop outside the recording, unreadable BDF, rated MAHNOB session without a BDF) are recorded as skipped in the feature file together with the extractor's own skips (see `sieeg info`).
 `sieeg extract` does not replace an existing feature file unless `--overwrite` is given.
 
@@ -111,10 +111,11 @@ P02,1,arrays/P02_t1.npy,5,5,,
 | `transpose` | no | `true` if the array is (n_times, n_channels) |
 | `scale` | no | multiplier to volts, e.g. `1e-6` for microvolts |
 
-Column names must be spelled exactly as above; spaces around them are ignored.
+Column names must be spelled exactly as above, and each only once; spaces around them are ignored, so `tmin` with a space before it is still the column `tmin` (and a second `tmin`).
 A known column in another case or spelling (`Tmin`, `Scale`, `array key`) or a common alias (`onset`/`start`, `offset`/`end`/`stop`, `fs`/`srate`/`sampling_rate`, `arraykey`/`key`, `channels`) stops `sieeg extract` with an error naming the expected column, because a column that is not found silently falls back to its default (the whole file, no scaling).
 Other columns, such as notes, are ignored with a warning.
 Spaces around ids and paths are removed, so `S01` followed by a space is `S01`.
+Text cells (ids, paths, `ch_names`, `array_key`) are otherwise read as written, so `NA` or `None` is a value, not a missing one; leave a cell empty when it has no value (from R: `write.csv(..., na = "")`).
 Leave a rating empty when it is missing; any other non-numeric rating (`7.5.`, `-`) is an error.
 Rows that read the same samples as an earlier row (same file, variable and crop, e.g. forgotten `tmin`/`tmax` for a shared recording) are reported in a warning, since their features would be identical.
 
@@ -128,6 +129,7 @@ sieeg extract manifest daief.csv --dataset daief --out features/daief.npz \
 Channels are matched by name (case-insensitive) to the 32 BioSemi-32 channels of `features.channels` in `configs/paper.yaml`, which both databases contain.
 MNE-readable files keep only their EEG channels; if they use other labels (for example BioSemi's `A1`-`B32`), save the data as arrays with the 10-20 names in `ch_names`.
 `--dataset` names the database in every later output (run directories, the database label of Experiment 1), so use the same name throughout.
+It may not contain `:`, which separates database and subject in the dataset-qualified subject ids (`daief:S01`) that keep the subjects of two databases apart; subject ids may contain it.
 
 **The ten excluded DAI-EF participants.**
 The paper analyses 50 of the 60 DAI-EF participants: ten were excluded for high noise and incomplete recordings, and the paper states that their exact IDs were published in this repository.
@@ -268,7 +270,7 @@ Precedence, from lowest to highest: defaults, `--config FILE.yaml`, `--set secti
                                            # representation (not in the paper)
 ```
 
-Every value is checked when it is read: a wrong type (`train.epochs=1O`), a value out of range (`train.epochs=0`, `train.batch_size=0`) or an unknown option (`protocol.normalization=zscore`) stops the command with an error that names the key, before any data is loaded.
+Every value is checked when it is read, including the convenience flags: a wrong type (`train.epochs=1O`), a number that is not finite (`protocol.label_threshold=.nan`, `--lambda-subject nan`), a value out of range (`train.epochs=0`, `train.beta_2=1`, `features.welch_overlap=1`) or an unknown option (`protocol.normalization=zscore`) stops the command with an error that names the key, before any data is loaded.
 
 **Subject probes** (`--probe`, not in the paper): after each fold, a cross-validated logistic regression decodes the subject of the validation trials from the 128-d representation (`probe_subject_acc` vs the majority rate `probe_subject_chance`), and another separates the in-group trials (training and untested target trials) from the test subject's (`probe_group_bacc`, chance 0.5).
 Lower values mean less subject information; no emotion label is used.
@@ -301,7 +303,7 @@ The main choices, each a configuration key (all of them, with reasons, in [docs/
 - **Topographic maps (D6, D7)** as in EEGLearn (Bashivan et al., ICLR 2016): azimuthal-equidistant projection of the electrodes and Clough-Tocher interpolation onto 32x32 pixels, one image channel per band. Every feature is z-scored per participant first; test participants are normalised with their own unlabeled statistics, as in the paper.
 - **Keras-2 Nadam, re-implemented for Keras 3 (D12).** The learning rate 0.002 is the default of the standalone Keras-2 Nadam, which warms up its momentum with `schedule_decay=0.004`. Keras 3's Nadam has no `schedule_decay` and its warm-up is about 250x faster, so `LegacyNadam` reproduces the Keras 2.2.4 update.
 - **Out-group per target subject (D14).** Within a database the out-group is the held-out test subject. Across databases SI-EEG and SIDA-EEG train one model per target subject, whose trials form the out-group; the subject discriminator also sees the other target subjects, labeled in-group, because Eq. 3 sums the subject loss over source and target samples. Contrasting the source with the test subject alone would make its labels the database labels, so SI-EEG would be a DANN on that subject; `--set protocol.cross_per_subject=never` (whole target as out-group) has that effect and logs a warning.
-- **Identity adversary (D15).** SINN and SIDANN classify the training subjects and the pool subjects (the target subjects across databases, the test subject within a database). Pool samples weigh n_pool_subjects / n_train_subjects, so every subject counts equally: within DAI-EF the test subject, half of every identity batch, weighs as much as one training subject.
+- **Identity adversary (D15).** SINN and SIDANN classify the training subjects and the pool subjects (the target subjects across databases, the test subject within a database). Pool samples are down-weighted by (number of pool subjects) / (number of training subjects), so every subject has the same influence on the identity loss. Within DAI-EF, for example, the test subject fills half of every identity batch but counts as much as a single training subject.
 - **Validation-based model selection (D16).** Five validation subjects are drawn (seeded) from the non-test training subjects, and the epoch with the best validation weighted F1 is kept. Test and target labels are never used for training, batch sampling, model selection or class weights; they only score the predictions.
 - **Constant lambda inside the GRL (D11).** Lambda only scales the reversed gradient; the total loss is the unweighted sum of the classifier and discriminator losses.
 

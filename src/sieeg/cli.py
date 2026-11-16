@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from . import __version__
-from .config import ExperimentConfig, ProtocolConfig, load_config
+from .config import ExperimentConfig, ProtocolConfig, load_config, validate_config
 from .features.featureset import LABELS, FeatureSet
 from .training.methods import MethodSpec, available_methods, get_method
 from .utils import natural_sorted
@@ -347,7 +347,7 @@ def _run_config(args: argparse.Namespace) -> ExperimentConfig:
         cfg.protocol.lambda_domain = args.lambda_domain
     if args.probe:
         cfg.protocol.subject_probe = True
-    return cfg
+    return validate_config(cfg)  # the flags bypass load_config's checks (e.g. --lambda-subject nan)
 
 
 def _load_features(path: Path, exclude: Sequence[str] | None) -> FeatureSet:

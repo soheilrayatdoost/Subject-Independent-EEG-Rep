@@ -33,6 +33,12 @@ def write_csv(path: Path, rows: list[dict]) -> Path:
     return path
 
 
+def test_a_dataset_name_with_a_colon_is_rejected_before_any_file_is_read(tmp_path: Path) -> None:
+    csv = write_csv(tmp_path / "m.csv", [row("missing.npy")])  # never opened: the name is checked first
+    with pytest.raises(ValueError, match=r"Dataset name 'dai:ef' contains ':'"):
+        list(iter_manifest_trials(csv, dataset="dai:ef"))
+
+
 def write_fif(path: Path, data: np.ndarray) -> None:
     """EEG plus a stim and a misc channel, as an MNE-readable file."""
     info = mne.create_info(NAMES + ["STI 014", "GSR"], SFREQ, ["eeg"] * len(NAMES) + ["stim", "misc"])
@@ -297,6 +303,28 @@ def test_header_whitespace_is_stripped(tmp_path: Path) -> None:
         read_manifest(tmp_path / "dup.csv")
 
 
+@pytest.mark.parametrize(
+    ("extra", "repeated"),
+    [("tmin,tmin", "tmin"), ("tmin, tmin", "tmin"), ('"tmin","tmin"', "tmin"), ('"tmin"," tmin "', "tmin"),
+     ("notes,notes", "notes"), ("subject", "subject")],
+)
+@pytest.mark.parametrize("bom", ["", "\ufeff"])  # a UTF-8 byte-order mark before the first name
+def test_repeated_column_raises(tmp_path: Path, extra: str, repeated: str, bom: str) -> None:
+    """pandas renames a repeated name (tmin, tmin -> tmin, tmin.1), so the header is checked as written."""
+    np.save(tmp_path / "a.npy", signal())
+    csv = tmp_path / "m.csv"
+    cells = ",".join(str(i + 1) for i in range(extra.count(",") + 1))  # e.g. the crop 1, 2
+    csv.write_text(f"{bom}subject,trial,path,valence,arousal,{extra}\nS01,1,a.npy,7,3,{cells}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=rf"duplicate column\(s\) \['{repeated}'\]"):
+        list(iter_manifest_trials(csv, sfreq=SFREQ, ch_names=NAMES, on_error="raise"))
+
+
+def test_empty_header_cells_are_not_repeats(tmp_path: Path) -> None:
+    csv = tmp_path / "m.csv"  # e.g. a spreadsheet export with empty trailing columns: pandas' "Unnamed: i"
+    csv.write_text("subject,trial,path,valence,arousal,,\nS01,1,a.npy,7,3,,\n", encoding="utf-8")
+    assert list(read_manifest(csv).columns) == [*REQUIRED_COLUMNS, "Unnamed: 5", "Unnamed: 6"]
+
+
 def test_unknown_columns_are_kept_and_logged_once(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     csv = write_csv(tmp_path / "m.csv", [row("a.npy", notes="calm", video=3), row("a.npy", trial="2", notes="x")])
     with caplog.at_level(logging.WARNING, logger="sieeg.data.manifest"):
@@ -319,6 +347,21 @@ def test_ids_and_paths_are_stripped(tmp_path: Path) -> None:
     blank = write_csv(tmp_path / "blank.csv", [row("a.npy") | {"subject": "  "}])
     with pytest.raises(ValueError, match=r"rows \[0\]"):
         read_manifest(blank)
+
+
+@pytest.mark.parametrize("token", ["NA", "None", "null", "nan", "N/A", "#N/A"])
+def test_text_cells_are_literal(tmp_path: Path, token: str) -> None:
+    """Such ids stay text, as in the feature files and run reports; in numeric columns they mean missing."""
+    csv = tmp_path / "m.csv"
+    csv.write_text(
+        "subject,trial,path,ch_names,array_key,valence,arousal,tmin,sfreq,scale\n"
+        f"{token},{token},{token},{token},{token},{token},5,{token},{token},{token}\n",
+        encoding="utf-8",
+    )
+    [record] = read_manifest(csv).to_dict("records")
+    assert [record[c] for c in ("subject", "trial", "ch_names", "array_key")] == [token] * 4
+    assert record["path"] == str(tmp_path.resolve() / token)
+    assert all(np.isnan(record[c]) for c in ("valence", "tmin", "sfreq", "scale")) and record["arousal"] == 5.0
 
 
 def test_malformed_rating_raises_and_empty_means_unrated(tmp_path: Path) -> None:

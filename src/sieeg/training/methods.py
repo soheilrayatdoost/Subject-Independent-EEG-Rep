@@ -14,6 +14,7 @@ which gradient-reversal adversaries are attached to the 128-d representation:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 ADVERSARY_KINDS = ("group", "identity", "domain")
@@ -27,8 +28,8 @@ class AdversarySpec:
     def __post_init__(self) -> None:
         if self.kind not in ADVERSARY_KINDS:
             raise ValueError(f"Unknown adversary kind {self.kind!r}; expected one of {ADVERSARY_KINDS}")
-        if self.lam < 0:
-            raise ValueError(f"lambda must be >= 0, got {self.lam}")
+        if not (math.isfinite(self.lam) and self.lam >= 0):  # NaN or inf would train with NaN gradients
+            raise ValueError(f"lambda of the {self.kind} adversary must be a finite number >= 0, got {self.lam}")
 
 
 @dataclass(frozen=True)

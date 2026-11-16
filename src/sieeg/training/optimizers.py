@@ -48,7 +48,12 @@ class LegacyNadam(keras.optimizers.Optimizer):
         if self.built:
             return
         super().build(var_list)
-        self._momentums, self._velocities = self.add_optimizer_variables(var_list, ["momentum", "velocity"])
+        # Per-variable slots via add_variable_from_reference (every Keras 3), not add_optimizer_variables
+        # (Keras >= 3.10). Same names and momentum/velocity interleaving as the latter.
+        self._momentums, self._velocities = [], []
+        for var in var_list:
+            self._momentums.append(self.add_variable_from_reference(var, name="momentum"))
+            self._velocities.append(self.add_variable_from_reference(var, name="velocity"))
         self._mu_products = [
             self.add_variable(shape=(), initializer="ones", dtype=var.dtype, name="mu_product") for var in var_list
         ]

@@ -407,6 +407,22 @@ def test_bias_prints_and_saves_the_experiment_1_table(tmp_path, capsys):
 
 
 # ------------------------------------------------------------------- within / cross
+@pytest.mark.parametrize(
+    "flag, value, message",
+    [
+        ("--lambda-subject", "nan", "protocol.lambda_subject must be a finite number or null, got nan"),
+        ("--lambda-subject", "inf", "protocol.lambda_subject must be a finite number or null, got inf"),
+        ("--lambda-subject", "-0.1", "protocol.lambda_subject must be >= 0, got -0.1"),
+    ],
+)
+def test_convenience_flags_are_validated_like_the_config(features, tmp_path, recorder, capsys, flag, value, message):
+    argv = ["within", str(features), "--method", "si_eeg", "--label", "valence", "--out", str(tmp_path / "runs"),
+            flag, value]
+    assert main(argv) == 1
+    assert recorder == []  # rejected before anything trains
+    assert capsys.readouterr().err.strip() == f"sieeg within: error: {message}"
+
+
 def test_within_saves_one_run_directory_per_method_and_label(features, tmp_path, recorder, capsys):
     config = tmp_path / "exp.yaml"
     config.write_text("seed: 3\ntrain:\n  epochs: 10\n  batch_size: 8\n", encoding="utf-8")

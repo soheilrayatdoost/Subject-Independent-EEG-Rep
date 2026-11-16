@@ -70,15 +70,25 @@ raw files --loader--> Trial (volts, cropped to stimulus)
 
 - `sieeg.config`: `ExperimentConfig(seed, features: FeatureConfig, model: ModelConfig, train: TrainConfig, protocol: ProtocolConfig)`,
   `load_config(path, overrides)`, `apply_overrides(cfg, ["train.epochs=5"])`, `save_config`, `dump_config`, `config_to_dict`,
-  `config_from_dict`, `validate_config`, `CHOICES`, `MINIMUMS`, `BIOSEMI32_CHANNELS`, `PAPER_BANDS`.
+  `config_from_dict`, `validate_config`, `CHOICES`, `MINIMUMS`, `POSITIVE`, `FRACTIONS`, `BIOSEMI32_CHANNELS`, `PAPER_BANDS`.
   Every value read from YAML or an override is checked: its field type (an `X | None` field also takes `null`;
-  lists become tuples, integers floats; a number field also takes a numeric string such as `1e-3`, which PyYAML
-  reads as text), `MINIMUMS` (`train.epochs` and `train.batch_size` >= 1, `protocol.n_val_subjects` >= 0,
-  `protocol.jobs` >= 1) and `CHOICES` (optimizer, lambda_schedule, selection_metric, class_weight, reference,
-  interpolation, normalization, cross_per_subject, padding). A wrong value or a section given as a scalar is a
-  `ValueError` naming `section.key`, an unknown key a `KeyError`, and a YAML syntax error a `ValueError` naming
-  the file, line and column.
+  lists become tuples, integers floats; a number must be finite, so `.nan` and `.inf` are errors; a number field
+  also takes a numeric string such as `1e-3`, which PyYAML reads as text), `MINIMUMS` (>= 0: `seed`,
+  `features.l_freq`, `model.classifier_hidden`, `model.discriminator_hidden`, `train.schedule_decay`,
+  `protocol.n_val_subjects`, `protocol.lambda_subject`, `protocol.lambda_domain`; >= 1: `model.kernel_size`, every
+  filter count of `model.conv_blocks` and unit count of `model.dense_units`, `train.epochs`, `train.batch_size`,
+  `protocol.jobs`), `POSITIVE` (> 0: `features.resample_sfreq`, `features.h_freq`, `features.welch_segment_sec`,
+  `train.learning_rate`, `train.epsilon`), `FRACTIONS` (in [0, 1): `features.welch_overlap`, `model.dropout`,
+  `train.beta_1`, `train.beta_2`) and `CHOICES` (optimizer, lambda_schedule, selection_metric, class_weight, reference,
+  interpolation, normalization, cross_per_subject, padding); every band needs `0 <= low < high`, and
+  `features.grid_size` must leave the encoder a non-empty feature map (each conv block ends with a 2x2 max-pooling,
+  so the paper's two blocks need >= 4). `validate_config` applies the same checks to a configuration built in
+  Python, where a number given as a string (`welch_segment_sec="15"`) is an error; the CLI re-validates after its
+  convenience flags (`--epochs`, `--seed`, `--jobs`, `--lambda-subject`, `--lambda-domain`). A wrong value or a
+  section given as a scalar is a `ValueError` naming `section.key`, an unknown key a `KeyError`, and a YAML syntax
+  error a `ValueError` naming the file, line and column.
 - `sieeg.data.trial.Trial(dataset, subject, trial, data (n_ch, n_times) volts, sfreq, ch_names, valence, arousal, meta)`.
+  A dataset name containing `:` is a `ValueError` here and in `FeatureSet` (`utils.check_dataset_name`).
 - `sieeg.features.featureset.FeatureSet(dataset, band_power (n, n_ch, n_bands) log10, subjects, trials, valence, arousal, ch_names, bands, meta)`
   with `subset`, `select_subjects`, `drop_subjects`, `pick_channels`, `subject_ids` (natural order), `qualified_subjects`,
   `labels(label, threshold)`, `has_rating`, `normalized('subject'|'none')`, `flat_features`, `save`, `load`; `zscore_by_group`.
@@ -86,7 +96,9 @@ raw files --loader--> Trial (volts, cropped to stimulus)
 - `sieeg.training.methods`: `AdversarySpec(kind in {group, identity, domain}, lam)`,
   `MethodSpec(name, description, adversaries)`, `get_method(name, lambda_subject=None, lambda_domain=None)`,
   `available_methods()`.
-- `sieeg.utils`: `natural_key`, `natural_sorted`, `qualify(dataset, subject)`.
+- `sieeg.utils`: `natural_key`, `natural_sorted`, `check_dataset_name(dataset)` (`ValueError` if it contains `:`),
+  `qualify(dataset, subject)` = `"<dataset>:<subject>"`. Dataset names never contain `:` while subject ids may, so
+  the first colon ends the dataset name and distinct (dataset, subject) pairs never collide.
 - `tests/conftest.py`: fixtures `tiny_config`, `small_featureset`, `source_target_featuresets`, `raw_trials`, `rng`.
 
 Rules for all modules: no TensorFlow import at module level outside `models/` and
@@ -150,10 +162,13 @@ Several rows may point to the same file with different `tmin`/`tmax`. Cache the 
 recently opened file. Column names are exact (whitespace around them is removed). A known
 column in another case or spelling, or an alias (onset/start -> tmin, offset/end/stop -> tmax,
 fs/srate/sampling_rate -> sfreq, arraykey/key -> array_key, channels -> ch_names), is a
-`ValueError` naming the expected column; duplicate names are a `ValueError`; any other column
-is ignored with one warning. Text cells (subject, trial, path, ch_names, array_key) are
-stripped. An empty rating means unrated; any other non-numeric rating is a `ValueError` naming
-the rows. Rows that read the same samples as an earlier row (same file, array variable and
+`ValueError` naming the expected column. Duplicate names, including names that differ only in
+surrounding whitespace, are a `ValueError`; they are checked on the header row as written, since
+pandas would read a repeated `tmin` as `tmin.1`. Any other column is ignored with one warning.
+Text cells (subject, trial, path, ch_names, array_key) are stripped and otherwise literal: `NA`
+or `None` is a value, and only an empty cell is missing (pandas' missing-value tokens apply to the
+numeric columns only). An empty rating means unrated; any other non-numeric rating is a
+`ValueError` naming the rows. Rows that read the same samples as an earlier row (same file, array variable and
 crop) are reported in one warning.
 
 ```python
@@ -171,6 +186,7 @@ def iter_manifest_trials(manifest, *, dataset="daief", sfreq=None, ch_names=None
     # Arrays: sfreq / ch_names from the row, else from the file extras, else from the keyword defaults; error if unknown.
     # Precedence for scale: row > keyword > 1.0.
     # skipped (list): gets {"subject", "trial", "reason"} for every row skipped with on_error="warn".
+    # ValueError before any file is read if dataset contains ":".
 ```
 
 ## 6. Features
@@ -196,14 +212,17 @@ def preprocess(trial, cfg: FeatureConfig) -> Trial
     # 3) optional mne.filter.filter_data(l_freq, h_freq)
     # 4) resample to cfg.resample_sfreq with scipy.signal.resample_poly (rational up/down) if it differs
 def trial_band_power(trial, cfg) -> np.ndarray
-    # preprocess -> check_band_edges(cfg.bands, resampled sfreq) -> welch_psd -> band_log_power, (n_ch, n_bands)
+    # ValueError if a band edge is above trial.sfreq / 2 (upsampling cannot restore what the recording lacks) ->
+    # preprocess -> check_band_edges(cfg.bands, resampled sfreq) -> welch_psd -> band_log_power, (n_ch, n_bands).
+    # So every band lies below min(trial.sfreq, resampled sfreq) / 2.
 def extract_features(trials, cfg, *, dataset=None, on_error="warn", progress=True, loader_skipped=None) -> FeatureSet
     # Skip (warn) trials shorter than cfg.min_duration_sec and trials that raise (if on_error="warn").
     # meta = {"feature_config": config_to_dict-like dict, "skipped": [...], "n_input_trials", "sieeg_version"}.
-    # The dataset name comes from the first trial unless given.
-    # ValueError up front if a band edge is above cfg.resample_sfreq / 2. loader_skipped: the skipped list given to
-    # the loader, read after trials is exhausted; its records come first in meta["skipped"] and count in
-    # meta["n_input_trials"].
+    # All trials must come from one dataset (subject ids are unique only within one): a trial of another dataset
+    # than the first is a ValueError whatever on_error. The name is that dataset's, or dataset if given (a rename).
+    # ValueError up front if dataset contains ":" or a band edge is above cfg.resample_sfreq / 2. loader_skipped: the
+    # skipped list given to the loader, read after trials is exhausted; its records come first in meta["skipped"] and
+    # count in meta["n_input_trials"].
 ```
 
 ### 6.3 `sieeg.features.topomap`
@@ -340,8 +359,11 @@ def summarize_predictions(pred) -> dict
 
 ```python
 def paired_comparison(a: pd.Series, b: pd.Series) -> dict
-    # a, b: per-subject scores indexed by subject; aligned on common subjects (n >= 2 required).
-    # {"n", "mean_a", "mean_b", "mean_diff", "t", "p_ttest" (scipy ttest_rel), "p_wilcoxon"}.
+    # a, b: per-subject scores (percent) indexed by subject; aligned on common subjects (n >= 2 required).
+    # Both tests use the differences a - b rounded to 1e-9 percentage points, so float noise neither breaks
+    # ties between equal differences nor makes a zero difference nonzero.
+    # {"n", "mean_a", "mean_b", "mean_diff", "t", "p_ttest" (scipy ttest_1samp of the differences, as
+    # ttest_rel), "p_wilcoxon" (scipy wilcoxon, default method, which depends on the SciPy version)}.
     # p_wilcoxon is NaN if all differences are zero; t and p_ttest are NaN if all differences are equal
     # (no spread: scipy would report t = inf, p = 0).
 ```

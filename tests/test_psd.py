@@ -26,6 +26,18 @@ def test_long_signal_uses_15_s_segments_with_half_overlap(rng):
     np.testing.assert_allclose(psd, ref_psd)
 
 
+def test_overlap_close_to_one_keeps_fewer_overlapping_samples_than_a_segment(rng):
+    """round(nperseg * 0.9999) == nperseg for a 5 s trial at 256 Hz; scipy needs noverlap < nperseg."""
+    data = rng.standard_normal((2, int(5 * SFREQ)))
+    freqs, psd = welch_psd(data, SFREQ, overlap=0.9999)
+    ref_freqs, ref_psd = signal.welch(
+        data, fs=SFREQ, window="hann", nperseg=1280, noverlap=1279,
+        detrend="constant", scaling="density", average="mean",
+    )
+    np.testing.assert_array_equal(freqs, ref_freqs)
+    np.testing.assert_allclose(psd, ref_psd)
+
+
 def test_signal_shorter_than_15_s_is_one_segment(rng):
     n_times = int(10 * SFREQ)
     freqs, psd = welch_psd(rng.standard_normal((3, n_times)), SFREQ)
