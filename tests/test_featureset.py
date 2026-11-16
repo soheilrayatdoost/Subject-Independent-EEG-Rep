@@ -68,6 +68,9 @@ def test_subject_ids_and_qualified_subjects():
                     CHANNELS, BANDS)
     assert fs.subject_ids == ["1", "2", "10"]  # natural order
     assert fs.qualified_subjects.tolist() == ["mahnob:10", "mahnob:2", "mahnob:10", "mahnob:1"]
+    fs = FeatureSet("x", np.zeros((2, 3, 2)), ["²", "2"], ["a", "b"], [5, 5], [5, 5], CHANNELS, BANDS)
+    assert fs.subject_ids == ["2", "²"]  # "²" is not a decimal digit: it sorts as text
+    assert "subjects=2" in repr(fs)
 
 
 def test_dataset_names_cannot_contain_a_colon_but_subject_ids_can(tmp_path):
@@ -112,13 +115,38 @@ def test_select_and_drop_subjects():
 
 
 def test_pick_channels_is_case_insensitive_and_reorders():
-    fs = _featureset()
+    fs = _featureset(meta={"source": "unit"})
     picked = fs.pick_channels(["o2", "FP1"])
     assert picked.ch_names == ["O2", "Fp1"]  # the file's spelling, in the requested order
     np.testing.assert_array_equal(picked.band_power, fs.band_power[:, [2, 0], :])
     assert fs.ch_names == CHANNELS and fs.band_power.shape == (5, 3, 2)  # the original is unchanged
+    picked.meta["source"] = "changed"
+    assert fs.meta == {"source": "unit"}
     with pytest.raises(KeyError, match=r"\['Pz'\]"):
         fs.pick_channels(["Cz", "Pz"])
+
+
+def test_pick_channels_rejects_a_channel_requested_twice():
+    with pytest.raises(ValueError, match=r"Requested channels must be unique ignoring case, got \['Cz', 'cz'\]"):
+        _featureset().pick_channels(["Cz", "cz"])
+
+
+def test_band_names_must_be_unique():
+    with pytest.raises(ValueError, match=r"Band names must not repeat a band name, got \['a'\]"):
+        FeatureSet("toy", np.zeros((1, 1, 2)), ["S1"], ["1"], [5], [5], ["Cz"], [("a", 4, 8), ("a", 8, 13)])
+
+
+def test_channel_names_must_be_unique_ignoring_case(tmp_path):
+    """pick_channels() looks channels up by name.lower(): of rows "Cz" and "CZ" the later would serve both."""
+    message = r"Channel names must be unique ignoring case, got \['Cz', 'CZ'\]"
+    with pytest.raises(ValueError, match=message):
+        FeatureSet("toy", np.zeros((2, 3, 2)), ["S1", "S1"], ["1", "2"], [5, 5], [5, 5], ["Fp1", "Cz", "CZ"], BANDS)
+    path = _featureset().save(tmp_path / "f.npz")
+    with np.load(path) as z:
+        fields = {key: z[key] for key in z.files}
+    np.savez(path, **(fields | {"ch_names": np.array(["Fp1", "Cz", "CZ"])}))
+    with pytest.raises(ValueError, match=message):
+        FeatureSet.load(path)
 
 
 # ------------------------------------------------------------------ labels
@@ -220,6 +248,16 @@ def test_load_rejects_another_format_version(tmp_path):
     with pytest.raises(ValueError, match=f"feature format v{FORMAT_VERSION + 1}, expected v{FORMAT_VERSION}"):
         FeatureSet.load(path)
     assert json.loads(str(fields["meta"])) == {}
+
+
+def test_load_names_the_file_of_an_invalid_feature_set(tmp_path):
+    path = _featureset().save(tmp_path / "f.npz")
+    with np.load(path) as z:
+        fields = {key: z[key] for key in z.files}
+    repeated = np.array([fields["band_names"][0]] * len(fields["band_names"]))
+    np.savez(path, **(fields | {"band_names": repeated}))
+    with pytest.raises(ValueError, match=r"f\.npz: Band names must not repeat a band name"):
+        FeatureSet.load(path)
 
 
 # ------------------------------------------------------------------ provenance

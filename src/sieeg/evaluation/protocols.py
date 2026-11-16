@@ -24,6 +24,7 @@ the paper).
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import multiprocessing
@@ -236,10 +237,22 @@ def _probe_fold(trainer: Any, shared: _Shared, fold: _Fold) -> dict[str, float]:
 _worker_shared: _Shared | None = None  # set in each worker process by _init_worker
 
 
-def _init_worker(shared: _Shared, intra_op_threads: int) -> None:
-    """Process-pool initializer: cap TensorFlow's intra-op threads before any op runs; keep ``shared``."""
+def _let_gpu_memory_grow() -> None:
+    """Make this process take GPU memory on demand; must run before its first op. By default
+    TensorFlow reserves nearly all the memory of a GPU for one process, so the other processes
+    of ``jobs > 1`` could not create their CUDA context (cudaSetDevice: out of memory)."""
     import tensorflow as tf
 
+    for gpu in tf.config.list_physical_devices("GPU"):
+        tf.config.experimental.set_memory_growth(gpu, True)
+
+
+def _init_worker(shared: _Shared, intra_op_threads: int) -> None:
+    """Process-pool initializer, before any op runs: let GPU memory grow on demand, cap
+    TensorFlow's intra-op threads and keep ``shared``."""
+    import tensorflow as tf
+
+    _let_gpu_memory_grow()
     tf.config.threading.set_intra_op_parallelism_threads(intra_op_threads)
     global _worker_shared
     _worker_shared = shared
@@ -252,11 +265,21 @@ def _fit_fold_in_worker(fold: _Fold) -> _FoldOutput:
 def _fit_folds(shared: _Shared, folds: list[_Fold], jobs: int) -> Iterator[_FoldOutput]:
     """The output of every fold, in fold order. With ``jobs > 1``, folds train in spawned processes.
 
-    Each worker uses ``cpu_count // workers`` intra-op threads. Splits, seeds and data are the
-    same as with ``jobs=1``; only float32 summation order can differ with the thread count.
+    Each worker uses ``cpu_count // workers`` intra-op threads and lets its GPU memory grow on
+    demand, so that the workers share a GPU. Splits, seeds and data are the same as with
+    ``jobs=1``. On a CPU only the float32 summation order can differ, with the thread count. On
+    a GPU the scores differ like those of any two runs, because TensorFlow's default GPU kernels
+    are not deterministic, unless ``TF_DETERMINISTIC_OPS=1`` is set in the environment: the
+    workers inherit environment variables, not the TensorFlow settings of this process. A run of
+    one fold trains in this process, which with ``jobs > 1`` also lets its GPU memory grow, so
+    that a later run of this process can still start its workers on the same GPU.
     """
     workers = min(jobs, len(folds))
     if workers <= 1:
+        if jobs > 1:  # one fold now; a later run of this process may train in workers on the same GPU
+            # too late (this process already uses its GPU), or it has already limited its GPU memory
+            with contextlib.suppress(RuntimeError, ValueError):
+                _let_gpu_memory_grow()
         for fold in folds:
             yield _fit_fold(shared, fold)
         return

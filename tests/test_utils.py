@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from sieeg.utils import check_dataset_name, natural_key, natural_sorted, qualify
+from sieeg.utils import check_channel_names, check_dataset_name, natural_key, natural_sorted, qualify
 
 SRC = str(Path(__file__).resolve().parents[1] / "src")
 #: Ids that tie under natural_key ("1" / "01", "P1" / "p1"): the raw text must break the tie.
@@ -21,6 +21,15 @@ def test_natural_key_orders_numbers_numerically_and_text_case_insensitively():
     assert sorted(["S10", "S2", "S1"], key=natural_key) == ["S1", "S2", "S10"]
     assert natural_key("P07b") == natural_key("p7B")
     assert natural_key("2") < natural_key("10") < natural_key("a")  # numbers before text
+
+
+def test_natural_sorting_treats_only_decimal_digits_as_numbers():
+    """"²" is a digit to str.isdigit() but not to the regex split or to int(): it must sort as text."""
+    assert natural_key("²") == ((1, "²"),)
+    assert natural_key("S²2") == ((1, "s²"), (0, 2), (1, ""))
+    assert natural_sorted(["2", "²", "S1"]) == ["2", "S1", "²"]
+    assert natural_sorted(["①", "10", "9"]) == ["9", "10", "①"]
+    assert natural_key("S٣") == natural_key("S3")  # decimal digits of any script still count
 
 
 def test_natural_sorted_deduplicates_and_returns_strings():
@@ -65,3 +74,17 @@ def test_qualified_ids_cannot_collide_because_dataset_names_have_no_colon():
     assert check_dataset_name(2021) == "2021"  # Trial and FeatureSet store the name as a string
     with pytest.raises(ValueError, match=r"Dataset name ':' contains ':'"):
         check_dataset_name(":")
+
+
+def test_check_channel_names():
+    assert check_channel_names(("Fp1", "Cz", 7)) == ["Fp1", "Cz", "7"]
+    assert check_channel_names([]) == []
+    with pytest.raises(ValueError, match=r"^Channel names must be unique ignoring case, got \['Cz', 'CZ'\]$"):
+        check_channel_names(["Cz", "Fp1", "CZ"])
+    with pytest.raises(
+        ValueError,
+        match=r"^x\.bdf: channel names must be unique ignoring case, got \['O1', 'O1', 'o1'\], \['Cz', 'cz'\]$",
+    ):
+        check_channel_names(["O1", "Cz", "O1", "cz", "o1", "Fz"], "x.bdf: channel names")
+    # str.lower(), the folding every channel lookup uses; casefold() would merge these two
+    assert check_channel_names(["STRASSE", "straße"]) == ["STRASSE", "straße"]

@@ -370,3 +370,31 @@ def test_invalid_files_name_the_file(tmp_path, text, message):
 def test_a_missing_file_is_an_os_error(tmp_path):
     with pytest.raises(FileNotFoundError):
         load_config(tmp_path / "missing.yaml")
+
+
+def test_band_names_must_not_repeat(tmp_path):
+    message = r"features\.bands must not repeat a band name, got \['a'\]"
+    with pytest.raises(ValueError, match=f"^{message}$"):
+        apply_overrides(ExperimentConfig(), ["features.bands=[[a, 4, 8], [a, 8, 13], [b, 13, 30]]"])
+    cfg = ExperimentConfig()
+    built = dataclasses.replace(cfg, features=dataclasses.replace(cfg.features, bands=(("a", 4, 8), ("a", 8, 13))))
+    with pytest.raises(ValueError, match=message):
+        validate_config(built)
+    path = tmp_path / "exp.yaml"
+    path.write_text("features:\n  bands: [[a, 4, 8], [a, 8, 13]]\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=rf"exp\.yaml: {message}"):
+        load_config(path)
+
+
+def test_channels_must_be_unique_ignoring_case(tmp_path):
+    message = r"features\.channels must be unique ignoring case, got \['Cz', 'CZ'\]"
+    with pytest.raises(ValueError, match=f"^{message}$"):
+        apply_overrides(ExperimentConfig(), ["features.channels=[Fp1, Cz, CZ]"])
+    cfg = ExperimentConfig()
+    built = dataclasses.replace(cfg, features=dataclasses.replace(cfg.features, channels=("Fp1", "Cz", "CZ")))
+    with pytest.raises(ValueError, match=message):
+        validate_config(built)
+    path = tmp_path / "exp.yaml"
+    path.write_text("features:\n  channels: [Fp1, Cz, CZ]\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=rf"exp\.yaml: {message}"):
+        load_config(path)

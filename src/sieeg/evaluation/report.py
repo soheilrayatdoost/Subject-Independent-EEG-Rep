@@ -118,8 +118,12 @@ def save_run(result: RunResult, out_dir: str | Path, config: ExperimentConfig | 
 
     ``summary.json`` is written last, so a directory that has one holds a complete run
     (:func:`find_runs`). It is strict JSON: NaN and inf are written as ``null``. List-valued
-    fold cells are joined with ``;`` and fold names are made file-name safe for
-    ``history/<fold>.csv``. Existing files are overwritten.
+    fold cells are joined with ``;``. Fold names are made file-name safe for
+    ``history/<fold>.csv``: characters other than letters, digits, ``_``, ``.`` and ``-`` become
+    ``_``. Folds whose names already are safe file names come first; a fold whose file name is
+    taken, ignoring case, gets ``_`` appended and a warning names its file (``S_1`` is ``S_1.csv``
+    and ``S/1`` is ``S_1_.csv``, whatever the fold order; ``s1`` after ``S1`` is ``s1_.csv``).
+    Existing files are overwritten.
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -130,8 +134,21 @@ def save_run(result: RunResult, out_dir: str | Path, config: ExperimentConfig | 
     _join_lists(result.folds).to_csv(out / "folds.csv", index=False)
     if result.histories:
         (out / "history").mkdir(exist_ok=True)
-    for fold, history in result.histories.items():
-        history.to_csv(out / "history" / f"{_file_name(fold)}.csv", index=False)
+    # 'S/1' and 'S_1' (or 'S1' and 's1' on a case-insensitive file system) collide.
+    used: dict[str, tuple[str, str]] = {}  # lower-cased file name -> (fold, file name)
+    for fold in sorted(result.histories, key=lambda fold: _file_name(fold) != str(fold)):  # exact names first
+        name = base = _file_name(fold)
+        while name.lower() in used:
+            name += "_"
+        if name != base:
+            logger.warning(
+                "History of fold %r is saved as history/%s.csv: fold %r already has history/%s.csv, ignoring case",
+                fold,
+                name,
+                *used[base.lower()],
+            )
+        used[name.lower()] = (fold, name)
+        result.histories[fold].to_csv(out / "history" / f"{name}.csv", index=False)
     if config is not None:
         save_config(config, out / "config.yaml")
     text = json.dumps(_jsonable(result.summary), indent=2, allow_nan=False)
@@ -166,7 +183,7 @@ def find_runs(paths: str | Path | Iterable[str | Path]) -> list[Path]:
         if not root.exists():
             raise FileNotFoundError(f"No such file or directory: {root}")
         found.update(path.parent for path in root.rglob("summary.json") if path.is_file())
-    return sorted(found, key=lambda path: natural_key(str(path)))
+    return sorted(found, key=lambda path: (natural_key(str(path)), str(path)))  # str: natural_key ties 'A'/'a'
 
 
 # ------------------------------------------------------------------------ tables

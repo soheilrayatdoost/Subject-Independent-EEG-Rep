@@ -27,6 +27,26 @@ def test_paper_encoder_has_574528_parameters():
     assert [layer.units for layer in encoder.layers if isinstance(layer, keras.layers.Dense)] == [256, 128]
 
 
+def test_encoder_is_channels_last_whatever_the_global_image_format():
+    previous = keras.config.image_data_format()
+    keras.config.set_image_data_format("channels_first")
+    try:
+        encoder = build_encoder((32, 32, 6), ModelConfig())
+        z = encoder(np.zeros((2, 32, 32, 6), dtype=np.float32))
+    finally:
+        keras.config.set_image_data_format(previous)
+    assert encoder.count_params() == 574_528
+    assert encoder.output.shape == (None, 128)
+    image_layers = [
+        layer
+        for layer in encoder.layers
+        if isinstance(layer, (keras.layers.Conv2D, keras.layers.MaxPooling2D, keras.layers.Flatten))
+    ]
+    assert len(image_layers) == 7
+    assert {layer.data_format for layer in image_layers} == {"channels_last"}
+    assert z.shape == (2, 128)
+
+
 def test_tiny_encoder_output_shape(tiny_config, rng):
     encoder = build_encoder((8, 8, 6), tiny_config.model)
     z = encoder(rng.standard_normal((5, 8, 8, 6)).astype(np.float32))

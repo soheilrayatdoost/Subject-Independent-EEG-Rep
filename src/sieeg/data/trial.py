@@ -8,7 +8,7 @@ from typing import Any
 
 import numpy as np
 
-from ..utils import check_dataset_name
+from ..utils import check_channel_names, check_dataset_name
 
 
 def _as_rating(value: Any) -> float:
@@ -31,7 +31,8 @@ class Trial:
         trial: trial / session id within the subject (string).
         data: EEG in volts, shape ``(n_channels, n_times)``, already cropped to the stimulus.
         sfreq: sampling rate in Hz.
-        ch_names: channel names matching the rows of ``data``.
+        ch_names: channel names matching the rows of ``data``; unique ignoring case
+            (:func:`~sieeg.utils.check_channel_names`).
         valence, arousal: self-reported ratings (1-9 SAM scale); NaN when missing.
         meta: free-form provenance (file path, session id, stimulus, ...).
     """
@@ -51,7 +52,7 @@ class Trial:
         self.subject = str(self.subject)
         self.trial = str(self.trial)
         self.data = np.asarray(self.data, dtype=np.float64)
-        self.ch_names = [str(c) for c in self.ch_names]
+        self.ch_names = check_channel_names(self.ch_names)
         self.sfreq = float(self.sfreq)
         self.valence = _as_rating(self.valence)
         self.arousal = _as_rating(self.arousal)

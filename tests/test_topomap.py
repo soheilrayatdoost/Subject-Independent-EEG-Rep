@@ -214,3 +214,13 @@ def test_images_from_config(small_featureset, tiny_config):
     images = images_from_config(fs, cfg)
     assert images.shape == (4, 16, 16, 6)
     np.testing.assert_array_equal(images, build_images(fs, normalization="none", grid_size=16, method="linear"))
+
+
+def test_channels_sharing_an_electrode_position_are_rejected():
+    """qhull leaves a repeated point out of the triangulation, so its values would never reach an image."""
+    with pytest.raises(
+        ValueError, match=r"Channels 'Cz' and 'CZ' share an electrode position in montage 'standard_1005'"
+    ):
+        TopomapProjector(["Fp1", "Cz", "O1", "O2", "CZ", "T7", "T8"])
+    with pytest.raises(ValueError, match=r"Channels 'T7' and 'T3' share an electrode position"):
+        TopomapProjector(["Fp1", "Cz", "O1", "O2", "T7", "T3", "T8"], method="linear")  # aliases, distinct names

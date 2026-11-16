@@ -374,7 +374,9 @@ def test_lambda_zero_leaves_the_encoder_to_the_emotion_loss(tiny_config, toy):
 def test_each_head_reverses_the_gradient_with_its_own_lambda(tiny_config, toy, adversaries, pools):
     """One full-batch SGD(lr=1) step moves every weight by exactly -gradient. The encoder must move by
     dL_cls - sum_k lam_k dL_k and head k by dL_k, with L_k recomputed here from the batch: group
-    labels by out-group subject (D14), identity pool rows weighted n_pool / n_train subjects (D15)."""
+    labels by out-group subject (D14), identity pool rows weighted n_pool / n_train subjects (D15).
+    Exact float32 algebra: conftest turns TensorFloat-32 off, whose error of about 5e-4 exceeds the
+    1e-4 tolerance."""
     data = {"outgroup_of_target": outgroup_of_target(toy, 6), "outgroup": toy.outgroup, "target": toy.target}
     given = {pool.replace("_of_target", ""): data[pool] for pool in pools}
     method = MethodSpec("custom", "", tuple(AdversarySpec(kind, lam) for kind, lam in adversaries))
@@ -470,13 +472,15 @@ def test_learns_an_easy_problem(tiny_config, easy, name):
     assert (trainer.predict(easy.val.x) == easy.val.y).mean() > 0.7
 
 
-def test_same_seed_gives_identical_predictions(tiny_config, toy):
+@pytest.mark.parametrize("name", available_methods())
+def test_same_seed_gives_identical_predictions(tiny_config, toy, name):
     def run(seed):
-        trainer = make_trainer(tiny_config, "si_eeg", seed=seed, epochs=2)
-        trainer.fit(toy.train, toy.val, outgroup=toy.outgroup)
+        trainer = make_trainer(tiny_config, name, seed=seed, epochs=3)
+        trainer.fit(toy.train, toy.val, outgroup=toy.outgroup, target=toy.target)
         return trainer.predict_proba(toy.val.x)
 
     first = run(5)
+    # on a GPU this needs the deterministic kernels of conftest: TF_DETERMINISTIC_OPS=1
     np.testing.assert_array_equal(first, run(5))
     assert not np.allclose(first, run(6))
 
@@ -539,3 +543,28 @@ def test_restored_model_reproduces_its_validation_scores(tiny_config, toy):
     assert (proba.argmax(axis=1) == toy.val.y).mean() == pytest.approx(best["val_acc"])
     loss = -np.mean(np.log(proba[np.arange(len(toy.val)), toy.val.y]))
     assert loss == pytest.approx(best["val_loss"], rel=1e-5)
+
+
+@pytest.mark.parametrize("policy", ["float64", "mixed_float16"])
+def test_trains_in_float32_whatever_the_global_floatx_and_dtype_policy(tiny_config, toy, policy):
+    """~/.keras/keras.json may set floatx or a dtype policy; the network still trains and predicts in float32."""
+    tiny_config = dataclasses.replace(tiny_config, model=dataclasses.replace(tiny_config.model, dropout=0.2))
+    previous = keras.config.floatx(), keras.config.dtype_policy()
+    try:
+        # The reference trains under float32 whatever keras.json says (floatx float16 rounds the learning rate).
+        keras.config.set_floatx("float32")
+        keras.config.set_dtype_policy("float32")
+        reference = make_trainer(tiny_config, "si_eeg", epochs=1)  # dropout > 0 builds the Dropout layers too
+        reference.fit(toy.train, toy.val, outgroup=toy.outgroup)
+        keras.config.set_floatx("float64")
+        keras.config.set_dtype_policy(policy)  # Keras caches the policy on first use; set_floatx alone does not change it
+        trainer = make_trainer(tiny_config, "si_eeg", epochs=1)
+        trainer.fit(toy.train, toy.val, outgroup=toy.outgroup)
+        z, proba = trainer.embed(toy.val.x), trainer.predict_proba(toy.val.x)
+    finally:
+        keras.config.set_floatx(previous[0])
+        keras.config.set_dtype_policy(previous[1])
+    assert z.dtype == np.float32
+    assert {w.dtype for w in trainer.net.weights} == {"float32"}
+    np.testing.assert_array_equal(proba, reference.predict_proba(toy.val.x))
+    assert (keras.config.floatx(), keras.config.dtype_policy().name) == (previous[0], previous[1].name)

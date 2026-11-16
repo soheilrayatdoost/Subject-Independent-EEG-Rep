@@ -33,6 +33,7 @@ import numpy as np
 
 from ..config import BIOSEMI32_CHANNELS, PAPER_BANDS
 from ..features.featureset import FeatureSet
+from ..utils import check_band_names
 from .trial import Trial
 
 _PATTERN_SEED = 20210606  # emotion patterns are shared across synthetic datasets
@@ -42,6 +43,11 @@ def _keyed_rng(*key: object) -> np.random.Generator:
     """A random stream fixed by ``key`` alone (stable across runs, platforms and orderings)."""
     digest = hashlib.sha256(repr(key).encode("utf-8")).digest()
     return np.random.default_rng(int.from_bytes(digest[:16], "little"))
+
+
+def _as_seed(seed):
+    """An integer seed as a Python int (repr(np.int64(4)) is not repr(4) on numpy 2); other seeds as given."""
+    return int(seed) if isinstance(seed, (int, np.integer)) else seed
 
 
 def _cell_draws(seed: int, stream: str, channels: Sequence[str], bands: Sequence[tuple], size: int) -> np.ndarray:
@@ -67,6 +73,7 @@ def _latent_rows(
     seed: int,
     subject_prefix: str,
 ) -> list[tuple[str, str, float, float, np.ndarray]]:
+    check_band_names(bands, "bands")  # both generators key their draws by band name
     # Entries are iid N(0, 1), so every pattern has unit RMS in expectation; re-normalising over
     # the requested subset would rescale a reduced montage.
     patterns = _cell_draws(_PATTERN_SEED, "emotion", channels, bands, 2)
@@ -123,6 +130,7 @@ def make_synthetic_featureset(
     subject_prefix: str = "S",
 ) -> FeatureSet:
     """Feature-level synthetic dataset (log10 band power), see module docstring."""
+    seed = _as_seed(seed)
     rows = _latent_rows(
         n_subjects,
         n_trials,
@@ -179,12 +187,20 @@ def make_synthetic_trials(
 ) -> Iterator[Trial]:
     """Raw multichannel trials whose band power follows the latent model.
 
-    Each channel is pink-ish Gaussian noise whose spectrum is scaled inside every
-    band by ``10 ** (x / 2)`` (amplitude), so log10 band power shifts by ``x``
-    relative to the 1/f background. Overlapping bands (slow alpha within alpha)
-    multiply their gains. Each channel's white noise comes from a stream keyed by its name,
-    so a reordered or reduced montage renders the same signal for every named channel.
+    Each channel is pink-ish Gaussian noise (power falling as 1/f above 1 Hz, flat below) whose
+    spectrum is scaled inside every band by ``10 ** (x / 2)`` (amplitude), so log10 band power
+    shifts by ``x`` relative to the 1/f background. Overlapping bands (slow alpha within alpha)
+    multiply their gains.
+
+    ``amplitude_volts`` is the RMS of that background: a channel whose latent log power is 0 in
+    every band has the expected mean square ``amplitude_volts ** 2``. All channels and trials
+    share one gain, set by ``amplitude_volts``, ``sfreq`` and ``duration`` alone; trials are not
+    rescaled one by one, so a trial's own RMS follows its latent values (with the defaults,
+    typically 2-4 times ``amplitude_volts``). Each channel's white noise comes from a stream keyed
+    by its name, so a reordered or reduced montage renders the same signal, in volts, for every
+    named channel.
     """
+    seed = _as_seed(seed)
     rows = _latent_rows(
         n_subjects,
         n_trials,
@@ -201,6 +217,9 @@ def make_synthetic_trials(
     n_times = int(round(duration * sfreq))
     freqs = np.fft.rfftfreq(n_times, d=1.0 / sfreq)
     pink = 1.0 / np.sqrt(np.maximum(freqs, 1.0))
+    # Unit white noise shaped by pink has the variance mean(pink ** 2) over all n_times FFT bins (Parseval).
+    # irfft(pink ** 2)[0] is that mean: it adds the negative-frequency bins exactly as the rendering's irfft does.
+    to_volts = amplitude_volts / np.sqrt(np.fft.irfft(pink**2, n=n_times)[0])
     signal_rngs = [_keyed_rng(seed, "signal", str(channel).lower()) for channel in channels]
     for subject, trial, val, aro, x in rows:
         white = np.stack([rng.standard_normal(n_times) for rng in signal_rngs])
@@ -209,7 +228,7 @@ def make_synthetic_trials(
             in_band = (freqs >= lo) & (freqs < hi)
             spec[:, in_band] *= (10.0 ** (x[:, b] / 2.0))[:, None]
         data = np.fft.irfft(spec, n=n_times, axis=1)
-        data *= amplitude_volts / (data.std() + 1e-12)
+        data *= to_volts
         yield Trial(
             dataset=dataset,
             subject=subject,

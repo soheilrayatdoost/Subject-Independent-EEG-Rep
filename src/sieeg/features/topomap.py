@@ -93,6 +93,10 @@ class TopomapProjector:
         xs: ``(G,)`` x of the image columns, ``linspace(min X, max X, G)`` (left -> right).
         ys: ``(G,)`` y of the image rows, ``linspace(max Y, min Y, G)`` (row 0 = anterior).
         mask: ``(G, G)`` bool, True inside the electrodes' convex hull.
+
+    Raises:
+        ValueError: if two channels share an electrode position (a repeated name, or aliases
+            such as T3 / T7): the triangulation would leave one of them out of every image.
     """
 
     def __init__(
@@ -118,6 +122,12 @@ class TopomapProjector:
         grid_x, grid_y = np.meshgrid(self.xs, self.ys)  # "xy" indexing: [row, col] -> (xs[col], ys[row])
         self._points = np.column_stack([grid_x.ravel(), grid_y.ravel()])
         self._tri = Delaunay(self.positions_2d)
+        if len(self._tri.coplanar):  # qhull left these points out: their values would never reach an image
+            pairs = sorted(sorted((int(point), int(vertex))) for point, _, vertex in self._tri.coplanar)
+            names = ", ".join(f"{self.ch_names[a]!r} and {self.ch_names[b]!r}" for a, b in pairs)
+            raise ValueError(
+                f"Channels {names} share an electrode position in montage {montage!r}; keep one of each pair"
+            )
         # The interpolator itself decides which pixels are inside the hull, so the mask
         # matches the NaN pattern of every later call exactly.
         inside = np.isfinite(self._interpolate(np.ones((len(self.ch_names), 1))))

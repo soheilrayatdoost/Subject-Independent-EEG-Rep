@@ -386,3 +386,34 @@ def test_evaluation_and_bias_modules_do_not_import_tensorflow():
         "assert 'tensorflow' not in sys.modules and 'keras' not in sys.modules"
     )
     subprocess.run([sys.executable, "-c", code], check=True, env=env)
+
+
+def test_find_runs_is_independent_of_the_string_hash_seed(tmp_path):
+    """natural_key ties 'A' with 'a' and 'run1' with 'run01'; set order must not decide between them."""
+    for name in ("cnn-A", "cnn-a", "cnn-run1", "cnn-run01"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "summary.json").write_text("{}", encoding="utf-8")
+    code = f"from sieeg.evaluation.report import find_runs; print([p.name for p in find_runs({str(tmp_path)!r})])"
+    src = str(Path(__file__).resolve().parents[1] / "src")
+    outputs = set()
+    for seed in ("0", "1", "2", "3"):
+        env = {**os.environ, "PYTHONHASHSEED": seed, "PYTHONPATH": src}
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, check=True)
+        outputs.add(result.stdout.strip())
+    assert len(outputs) == 1
+
+
+def test_fold_names_that_map_to_one_file_name_keep_both_histories(tmp_path, caplog):
+    """A fold named S_1 keeps S_1.csv whatever the fold order; S/1 moves to S_1_.csv, with a warning."""
+    run = _make_run("cnn", "valence", [5])
+    first = pd.DataFrame({"epoch": [1], "loss_cls": [0.1]})
+    second = pd.DataFrame({"epoch": [1], "loss_cls": [0.2]})
+    run.histories = {"S/1": first, "S_1": second, "S1": first, "s1": second}  # S1 / s1: case-insensitive file systems
+    with caplog.at_level(logging.WARNING, logger="sieeg"):
+        save_run(run, tmp_path)
+    pd.testing.assert_frame_equal(pd.read_csv(tmp_path / "history" / "S_1.csv"), second)
+    pd.testing.assert_frame_equal(pd.read_csv(tmp_path / "history" / "S_1_.csv"), first)
+    pd.testing.assert_frame_equal(pd.read_csv(tmp_path / "history" / "S1.csv"), first)
+    pd.testing.assert_frame_equal(pd.read_csv(tmp_path / "history" / "s1_.csv"), second)
+    assert "History of fold 'S/1' is saved as history/S_1_.csv: fold 'S_1' already has history/S_1.csv" in caplog.text
+    assert "History of fold 's1' is saved as history/s1_.csv: fold 'S1' already has history/S1.csv" in caplog.text

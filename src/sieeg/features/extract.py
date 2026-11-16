@@ -18,7 +18,7 @@ from scipy import signal
 from .. import __version__
 from ..config import FeatureConfig, config_to_dict
 from ..data.trial import Trial
-from ..utils import check_dataset_name
+from ..utils import check_band_names, check_channel_names, check_dataset_name
 from .featureset import FeatureSet
 from .psd import band_log_power, check_band_edges, welch_psd
 
@@ -136,6 +136,7 @@ def extract_features(
 
     Raises:
         ValueError: if ``on_error`` is unknown, ``cfg.channels`` or ``cfg.bands`` is empty,
+            ``cfg.channels`` repeats a name ignoring case, ``cfg.bands`` repeats a band name,
             ``dataset`` contains ``":"``, a band reaches above the Nyquist frequency of
             ``cfg.resample_sfreq``, a trial comes from another dataset than the first (whatever
             ``on_error``), or no trial yields features.
@@ -146,6 +147,8 @@ def extract_features(
     for key in ("channels", "bands"):
         if not getattr(cfg, key):
             raise ValueError(f"features.{key} must not be empty")
+    check_channel_names(cfg.channels, "features.channels")
+    check_band_names(cfg.bands, "features.bands")
     if dataset is not None:
         dataset = check_dataset_name(dataset)
     if cfg.resample_sfreq is not None:

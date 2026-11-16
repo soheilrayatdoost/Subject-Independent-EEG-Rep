@@ -108,7 +108,7 @@ P02,1,arrays/P02_t1.npy,5,5,,
 | `sfreq` | no | sampling rate of an array file |
 | `ch_names` | no | channel names of an array file, separated by `;` |
 | `array_key` | no | variable holding the EEG in a `.npz` / `.mat` file (default: `data`, else the only 2-D array) |
-| `transpose` | no | `true` if the array is (n_times, n_channels) |
+| `transpose` | no | `1`, `true` or `yes` if the array is (n_times, n_channels); `0`, `false`, `no` or empty if it is not |
 | `scale` | no | multiplier to volts, e.g. `1e-6` for microvolts |
 
 Column names must be spelled exactly as above, and each only once; spaces around them are ignored, so `tmin` with a space before it is still the column `tmin` (and a second `tmin`).
@@ -116,7 +116,8 @@ A known column in another case or spelling (`Tmin`, `Scale`, `array key`) or a c
 Other columns, such as notes, are ignored with a warning.
 Spaces around ids and paths are removed, so `S01` followed by a space is `S01`.
 Text cells (ids, paths, `ch_names`, `array_key`) are otherwise read as written, so `NA` or `None` is a value, not a missing one; leave a cell empty when it has no value (from R: `write.csv(..., na = "")`).
-Leave a rating empty when it is missing; any other non-numeric rating (`7.5.`, `-`) is an error.
+In the other columns (ratings, `tmin`, `tmax`, `sfreq`, `scale`, `transpose`) an empty cell or a missing-value marker (pandas' defaults, such as `NA`, `N/A`, `#N/A`, `NaN`, `null`, `None`, in any letter case) means no value: the rating is missing, an optional column falls back to its default.
+Any other non-numeric rating (`7.5.`, `-`) is an error; a malformed value in an optional column skips that row (`sfreq` and `transpose` are read for array files only).
 Rows that read the same samples as an earlier row (same file, variable and crop, e.g. forgotten `tmin`/`tmax` for a shared recording) are reported in a warning, since their features would be identical.
 
 ```bash
@@ -127,6 +128,7 @@ sieeg extract manifest daief.csv --dataset daief --out features/daief.npz \
 ```
 
 Channels are matched by name (case-insensitive) to the 32 BioSemi-32 channels of `features.channels` in `configs/paper.yaml`, which both databases contain.
+Channel names must be unique ignoring case: a `features.channels` list, a `--ch-names` list or a feature file that repeats a name, also in another case (`Cz`, `CZ`), stops the command, and a recording with such names is skipped with a warning and listed as skipped, like any trial that cannot be read. A `features.bands` list that repeats a band name stops the command as well, and `within` and `cross` stop when two channels share an electrode position (aliases such as `T3` and `T7`).
 MNE-readable files keep only their EEG channels; if they use other labels (for example BioSemi's `A1`-`B32`), save the data as arrays with the 10-20 names in `ch_names`.
 `--dataset` names the database in every later output (run directories, the database label of Experiment 1), so use the same name throughout.
 It may not contain `:`, which separates database and subject in the dataset-qualified subject ids (`daief:S01`) that keep the subjects of two databases apart; subject ids may contain it.
@@ -158,7 +160,7 @@ The per-subject z-score of the deep models removes such constant factors, but th
 
 The defaults are the paper's settings (`configs/paper.yaml`): 100 epochs, Nadam(0.002, 0.9, 0.999), batch size 32, the best epoch selected on five validation subjects, lambda 0.2 for SI-EEG and 0.15 (subject) / 0.1 (database) for SIDA-EEG.
 Ratings above 5 form the high-arousal / positive-valence class; a rating of 5 is low / negative.
-Add `--jobs N` to train N folds in parallel processes.
+Add `--jobs N` to train N folds in parallel processes; on a GPU they share its memory (about 0.5 GB per process for the paper's model).
 
 **Experiment 1: subject and database information in the features.**
 Random forests (500 trees, 10-fold cross-validation) on the 192 log band-power features identify the participant among the 50 DAI-EF subjects and the database (DAI-EF vs MAHNOB-HCI), without and with per-subject z-scoring (fitted inside every fold on each participant's training trials, or on all of its trials when the fold holds the participant out entirely).
@@ -220,6 +222,10 @@ For SIDA-EEG, nest a loop over `--lambda-domain` inside one over `--lambda-subje
 Choosing lambda by test scores is optimistic: `folds.csv` records each fold's validation score (`best_val`), which allows choosing without test labels.
 
 **Seeds.** `--seed` changes the validation subjects, the initialisation and the batch order; every seed has its own run directory (`seed<N>`).
+On a CPU a seed reproduces a run exactly, and `--jobs N` equals `--jobs 1` up to float32 rounding (about 1e-7 in the probabilities after a few epochs; the difference grows with training and reached 1e-2 after 100 epochs of a small model).
+On a GPU TensorFlow's default kernels are not deterministic: two runs with the same seed differ slightly (about 1e-4 in the probabilities after two epochs of a small model), with any `--jobs`.
+Set `TF_DETERMINISTIC_OPS=1` in the environment for bit-identical GPU runs, also across `--jobs` (TensorFlow has deprecated the variable in favour of `tf.config.experimental.enable_op_determinism()`, which is enough for `--jobs 1` from Python if it is called before the process trains anything; the variable is used here because it is the only setting the parallel processes inherit; this was checked with TensorFlow 2.18 only, so compare two short runs when you use another version); the parallel processes inherit environment variables but not `tf.config` settings made in your own Python process.
+It cannot be combined with `--set train.jit_compile=true`: TensorFlow has no deterministic XLA gradient for max pooling and stops with an `UnimplementedError`.
 
 ## Outputs
 
@@ -239,7 +245,10 @@ runs/
                           subject-probe scores probe_subject_acc, probe_subject_chance, probe_group_bacc
                           (fractions; empty unless protocol.subject_probe)
     history/<fold>.csv    per epoch: lambdas, losses and accuracies of the classifier and each adversary,
-                          validation loss, accuracy and F1 (accuracies and F1 as fractions, not %)
+                          validation loss, accuracy and F1 (accuracies and F1 as fractions, not %);
+                          <fold> is the fold name with characters other than letters, digits, _ . -
+                          replaced by _, and a fold whose file name is taken (S/1 next to a fold S_1,
+                          or s1 next to S1) gets _ appended, with a warning naming the file
     config.yaml           the resolved configuration of the command (reusable with --config); its features.*
                           section does not describe the feature file (see features.json)
     features.json         each input feature file: path, SHA-256, dataset, excluded and remaining subjects,

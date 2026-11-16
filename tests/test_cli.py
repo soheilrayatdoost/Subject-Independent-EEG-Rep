@@ -190,6 +190,14 @@ def test_parser_rejects_invalid_arguments(argv, capsys):
     assert "usage: sieeg" in capsys.readouterr().err
 
 
+def test_positive_int_arguments_reject_non_decimal_digits(capsys):
+    """"²" passes str.isdigit() but not int(): the message must still be the argument's own."""
+    with pytest.raises(SystemExit) as exc:
+        main(["within", "f.npz", "--method", "cnn", "--label", "valence", "--jobs", "²"])
+    assert exc.value.code == 2
+    assert "argument --jobs: expected a positive integer, got '²'" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize(
     ("argv", "verbose", "quiet"),
     [

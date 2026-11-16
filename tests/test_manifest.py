@@ -39,6 +39,34 @@ def test_a_dataset_name_with_a_colon_is_rejected_before_any_file_is_read(tmp_pat
         list(iter_manifest_trials(csv, dataset="dai:ef"))
 
 
+def test_colliding_ch_names_are_rejected_before_any_file_is_read(tmp_path: Path) -> None:
+    csv = write_csv(tmp_path / "m.csv", [row("missing.npy")])  # never opened: ch_names is checked first
+    with pytest.raises(ValueError, match=r"ch_names must be unique ignoring case, got \['Cz', 'CZ'\]"):
+        list(iter_manifest_trials(csv, ch_names=["Cz", "CZ"], on_error="warn"))
+
+
+def test_ch_names_given_as_one_string_are_rejected(tmp_path: Path) -> None:
+    csv = write_csv(tmp_path / "m.csv", [row("missing.npy")])  # never opened: ch_names is checked first
+    with pytest.raises(TypeError, match=r"ch_names must be a list of names, got the string 'Fp1;Fp2'"):
+        list(iter_manifest_trials(csv, ch_names="Fp1;Fp2", on_error="warn"))
+
+
+@pytest.mark.parametrize(
+    ("keyword", "message"),
+    [
+        ({"sfreq": 0}, "sfreq must be a positive number"),
+        ({"sfreq": -128.0}, "sfreq must be a positive number"),
+        ({"sfreq": float("nan")}, "sfreq must be a positive number"),
+        ({"scale": float("nan")}, "scale must be a finite number other than 0"),
+        ({"scale": 0}, "scale must be a finite number other than 0"),  # would flatten every recording
+    ],
+)
+def test_invalid_sfreq_or_scale_is_rejected_before_any_file_is_read(tmp_path: Path, keyword, message) -> None:
+    csv = write_csv(tmp_path / "m.csv", [row("missing.npy")])  # never opened: the keywords are checked first
+    with pytest.raises(ValueError, match=message):
+        list(iter_manifest_trials(csv, on_error="warn", **keyword))
+
+
 def write_fif(path: Path, data: np.ndarray) -> None:
     """EEG plus a stim and a misc channel, as an MNE-readable file."""
     info = mne.create_info(NAMES + ["STI 014", "GSR"], SFREQ, ["eeg"] * len(NAMES) + ["stim", "misc"])
@@ -118,6 +146,21 @@ def test_npy_transpose(tmp_path: Path, flag: object) -> None:
         list(iter_manifest_trials(unflagged, on_error="raise"))
 
 
+@pytest.mark.parametrize(
+    ("cells", "message"),
+    [
+        ({"sfreq": SFREQ, "scale": 0}, "scale must be a finite number other than 0, got 0.0"),
+        ({"sfreq": 0}, "sfreq must be a positive number, got 0.0"),
+        ({"sfreq": "inf"}, "sfreq must be a positive number, got inf"),
+    ],
+)
+def test_an_invalid_scale_or_sfreq_cell_fails_its_row(tmp_path: Path, cells, message) -> None:
+    np.save(tmp_path / "a.npy", signal())
+    csv = write_csv(tmp_path / "m.csv", [row("a.npy", ch_names=";".join(NAMES), **cells)])
+    with pytest.raises(ValueError, match=message):
+        list(iter_manifest_trials(csv, on_error="raise"))
+
+
 def test_npz_stored_metadata_and_precedence(tmp_path: Path) -> None:
     data = signal()
     np.savez(tmp_path / "s.npz", data=data, sfreq=256.0, ch_names=np.array(NAMES))
@@ -183,6 +226,14 @@ def test_mne_file_matches_array_file(tmp_path: Path) -> None:
     assert from_mne.ch_names == NAMES and from_mne.sfreq == SFREQ  # stim and misc channels dropped
     np.testing.assert_array_equal(from_array.data, data[:, 100:300])
     np.testing.assert_allclose(from_mne.data, from_array.data, rtol=1e-12, atol=0)
+
+
+def test_an_mne_file_ignores_its_sfreq_and_transpose_cells(tmp_path: Path) -> None:
+    """The file states both; README and DESIGN say these cells are read for array files only."""
+    write_fif(tmp_path / "rec_raw.fif", signal())
+    rows = [row("rec_raw.fif", sfreq="fast", transpose="maybe")]
+    (trial,) = iter_manifest_trials(write_csv(tmp_path / "m.csv", rows), on_error="raise")
+    assert trial.sfreq == SFREQ and trial.ch_names == NAMES
 
 
 def test_rows_sharing_a_file_read_it_once(tmp_path: Path) -> None:
@@ -410,3 +461,96 @@ def test_skipped_rows_are_reported_to_the_caller(tmp_path: Path) -> None:
     assert [(s["subject"], s["trial"]) for s in skipped] == [("S01", "2"), ("S01", "3")]
     assert skipped[0]["reason"].startswith("FileNotFoundError: ") and "missing.npy" in skipped[0]["reason"]
     assert skipped[1]["reason"].startswith("ValueError: ") and "outside the recording" in skipped[1]["reason"]
+
+
+# ------------------------------------------------------------------ one missing-value rule
+
+
+def test_csv_and_dataframe_manifests_follow_one_missing_value_rule(tmp_path: Path) -> None:
+    """The same cells as a CSV file, as a frame of strings and as the frame read_manifest returns."""
+    data = signal()
+    np.save(tmp_path / "a.npy", data)
+    np.save(tmp_path / "t.npy", data.T)
+    a, t = str(tmp_path / "a.npy"), str(tmp_path / "t.npy")  # absolute: a frame has no folder to resolve against
+    columns = ["subject", "trial", "path", "valence", "arousal", "tmin", "tmax", "sfreq", "scale", "transpose"]
+    cells = [
+        ["NA", "None", a, "NA", "", "", "NA", "N/A", "null", ""],  # literal ids; every other cell is missing
+        ["S01", "2", a, " 7 ", "n/a", " 1.0 ", "2.5", " ", "1e-6", "NaN"],
+        ["S01", "3", t, "2", "None", "nan", "#N/A", "50", "NULL", " yes "],
+        ["S01", "4", a, "7", "3", "soon", "", "", "", ""],  # a malformed cell fails only its row
+        ["S01", "5", a, "7", "3", "", "", "fast", "", ""],
+        ["S01", "6", a, "7", "3", "", "", "", "big", ""],
+        ["S01", "7", a, "7", "3", "", "", "", "", "maybe"],
+    ]
+    csv = tmp_path / "m.csv"
+    csv.write_text("\n".join(",".join(line) for line in [columns, *cells]) + "\n", encoding="utf-8")
+    loaded = []
+    for manifest in (csv, pd.DataFrame(cells, columns=columns), read_manifest(csv)):
+        skipped: list[dict] = []
+        trials = iter_manifest_trials(manifest, sfreq=SFREQ, ch_names=NAMES, skipped=skipped)
+        loaded.append(([(x.subject, x.trial, x.valence, x.arousal, x.sfreq, x.data, x.meta) for x in trials], skipped))
+    from_csv, from_strings, from_frame = loaded
+    np.testing.assert_equal(from_strings, from_csv)  # compares NaN ratings as equal
+    np.testing.assert_equal(from_frame, from_csv)
+    trials, skipped = from_csv
+    np.testing.assert_equal([x[:5] for x in trials], [
+        ("NA", "None", np.nan, np.nan, SFREQ), ("S01", "2", 7.0, np.nan, SFREQ), ("S01", "3", 2.0, np.nan, 50.0)])
+    np.testing.assert_array_equal(trials[0][5], data)  # no crop, no scale, not transposed
+    np.testing.assert_array_equal(trials[1][5], data[:, 100:250] * 1e-6)
+    np.testing.assert_array_equal(trials[2][5], data)  # transposed back
+    assert [(s["trial"], s["reason"]) for s in skipped] == [
+        ("4", "ValueError: could not convert string to float: 'soon'"),
+        ("5", "ValueError: could not convert string to float: 'fast'"),
+        ("6", "ValueError: could not convert string to float: 'big'"),
+        ("7", "ValueError: transpose must be one of ('1', 'true', 'yes', '0', 'false', 'no'), got 'maybe'"),
+    ]
+
+
+def test_missing_value_tokens_of_the_numeric_columns(tmp_path: Path) -> None:
+    """pandas' default missing-value markers, which read_csv applied to these columns, in any letter case."""
+    pandas_defaults = ["#N/A", "#N/A N/A", "#NA", "-1.#IND", "-1.#QNAN", "-NaN", "-nan", "1.#IND", "1.#QNAN", "<NA>",
+                       "N/A", "NA", "NULL", "NaN", "None", "n/a", "nan", "null"]
+    tokens = [*pandas_defaults, "na", "none", "Null", "NAN", " NA ", "", "  "]
+    np.save(tmp_path / "a.npy", signal())
+    numeric = ("valence", "arousal", "tmin", "tmax", "sfreq", "scale", "transpose")
+    frame = pd.DataFrame([row(str(tmp_path / "a.npy"), trial=str(i)) | dict.fromkeys(numeric, token)
+                          for i, token in enumerate(tokens)])
+    trials = list(iter_manifest_trials(frame, sfreq=SFREQ, ch_names=NAMES, on_error="raise"))
+    assert len(trials) == len(tokens)
+    for trial in trials:  # not rated; the whole file, the keyword's sampling rate, no scaling, not transposed
+        assert np.isnan(trial.valence) and np.isnan(trial.arousal)
+        assert (trial.data.shape, trial.sfreq, trial.meta["scale"]) == (signal().shape, SFREQ, 1.0)
+    csv = write_csv(tmp_path / "m.csv", frame.to_dict("records"))
+    assert read_manifest(csv)[list(numeric)].isna().all(axis=None)
+
+
+def test_read_manifest_keeps_numbers_as_floats(tmp_path: Path) -> None:
+    csv = tmp_path / "m.csv"
+    csv.write_text(
+        "subject,trial,path,valence,arousal,tmin,tmax,sfreq,scale\n"
+        "S01,1,a.npy,7,3,12, 72.5 ,128,1e-6\n"
+        "S01,2,a.npy,NA,,,NA,,\n"
+        "S01,3,a.npy,7,3,1,soon,128,1\n",
+        encoding="utf-8",
+    )
+    df = read_manifest(csv)
+    assert [str(df[c].dtype) for c in ("valence", "arousal", "tmin", "sfreq", "scale")] == ["float64"] * 5
+    expected = [[12.0, 128.0, 1e-6], [np.nan] * 3, [1.0, 128.0, 1.0]]
+    np.testing.assert_array_equal(df[["tmin", "sfreq", "scale"]], expected)
+    np.testing.assert_equal(df["tmax"].tolist(), [72.5, np.nan, "soon"])  # a malformed cell is left for its row
+
+
+def test_transpose_cells(tmp_path: Path) -> None:
+    data = signal()
+    np.save(tmp_path / "t.npy", data.T)
+    np.save(tmp_path / "a.npy", data)
+    rows = [row("t.npy", transpose=1), row("a.npy", trial="2", transpose=0), row("a.npy", trial="3")]
+    csv = write_csv(tmp_path / "m.csv", rows)  # pandas writes a 0 / 1 column with an empty cell as 1.0 / 0.0
+    assert [line.rsplit(",", 1)[1] for line in csv.read_text().splitlines()[1:]] == ["1.0", "0.0", ""]
+    for trial in iter_manifest_trials(csv, sfreq=SFREQ, ch_names=NAMES, on_error="raise"):
+        np.testing.assert_array_equal(trial.data, data)
+    for bad in (2, "2", 0.5):  # neither a CSV file nor a frame takes another number as true
+        for manifest in (write_csv(tmp_path / "bad.csv", [row("t.npy", transpose=bad)]),
+                         pd.DataFrame([row(str(tmp_path / "t.npy"), transpose=bad)])):
+            with pytest.raises(ValueError, match=rf"transpose must be one of .*, got {bad!r}|got '{bad}'"):
+                list(iter_manifest_trials(manifest, sfreq=SFREQ, ch_names=NAMES, on_error="raise"))

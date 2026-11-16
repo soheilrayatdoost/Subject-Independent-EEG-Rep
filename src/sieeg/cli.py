@@ -99,7 +99,7 @@ def _method_list(text: str) -> list[str]:
 
 def _positive_int(text: str) -> int:
     """argparse type: an integer >= 1."""
-    if not text.strip().isdigit() or int(text) < 1:
+    if not text.strip().isdecimal() or int(text) < 1:
         raise argparse.ArgumentTypeError(f"expected a positive integer, got {text!r}")
     return int(text)
 

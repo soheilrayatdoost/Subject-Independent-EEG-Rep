@@ -10,6 +10,7 @@ import pytest
 
 from sieeg import __version__
 from sieeg.config import BIOSEMI32_CHANNELS, PAPER_BANDS, FeatureConfig, config_to_dict
+from sieeg.data.synthetic import make_synthetic_trials
 from sieeg.data.trial import Trial
 from sieeg.features.extract import extract_features, preprocess, trial_band_power
 from sieeg.features.featureset import FeatureSet
@@ -291,3 +292,48 @@ def test_empty_channels_or_bands_fail_before_any_trial_is_read(field):
 
     with pytest.raises(ValueError, match=rf"features\.{field} must not be empty"):
         extract_features(trials(), FeatureConfig(**{field: ()}), progress=False)
+
+
+def test_trial_channel_names_must_be_unique_ignoring_case(tmp_path, rng):
+    """preprocess() looks channels up by name.lower(): of rows "Cz" and "CZ" the later would serve both spellings."""
+    from sieeg.data.manifest import iter_manifest_trials
+
+    message = r"Channel names must be unique ignoring case, got \['Cz', 'CZ'\]"
+    data = 1e-6 * rng.standard_normal((3, 1024))
+    with pytest.raises(ValueError, match=message):
+        Trial("toy", "1", "1", data, 128.0, ["Cz", "Fp1", "CZ"])
+    np.save(tmp_path / "eeg.npy", data)
+    (tmp_path / "m.csv").write_text(
+        "subject,trial,path,valence,arousal,sfreq,ch_names\n"
+        f"S1,T1,{tmp_path / 'eeg.npy'},5,5,128,Cz;Fp1;CZ\n"
+        f"S1,T2,{tmp_path / 'eeg.npy'},5,5,128,Cz;Fp1;C3\n"
+    )
+    skipped: list[dict] = []
+    trials = list(iter_manifest_trials(tmp_path / "m.csv", dataset="toy", skipped=skipped))
+    assert [t.trial for t in trials] == ["T2"]
+    assert skipped == [
+        {"subject": "S1", "trial": "T1", "reason": "ValueError: Channel names must be unique ignoring case, got ['Cz', 'CZ']"}
+    ]
+    with pytest.raises(ValueError, match=message):
+        list(iter_manifest_trials(tmp_path / "m.csv", dataset="toy", on_error="raise"))
+
+
+def test_duplicate_channels_fail_before_any_trial_is_read():
+    def trials():
+        raise AssertionError("no trial may be read")
+        yield  # pragma: no cover - makes this a generator
+
+    with pytest.raises(ValueError, match=r"features\.channels must be unique ignoring case, got \['Cz', 'CZ'\]"):
+        extract_features(trials(), FeatureConfig(channels=("Fp1", "Cz", "CZ")), progress=False)
+
+
+def test_repeated_band_names_fail_before_any_trial_is_read_or_rendered():
+    def trials():
+        raise AssertionError("no trial may be read")
+        yield  # pragma: no cover - makes this a generator
+
+    bands = (("a", 4.0, 8.0), ("a", 8.0, 13.0), ("b", 13.0, 30.0))
+    with pytest.raises(ValueError, match=r"features\.bands must not repeat a band name, got \['a'\]"):
+        extract_features(trials(), FeatureConfig(bands=bands), progress=False)
+    with pytest.raises(ValueError, match=r"^bands must not repeat a band name"):  # its draws are keyed by band name
+        next(make_synthetic_trials(1, 1, bands=bands, duration=2.0))

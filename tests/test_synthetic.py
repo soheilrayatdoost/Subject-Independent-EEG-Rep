@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from sieeg.config import BIOSEMI32_CHANNELS, PAPER_BANDS
 from sieeg.data.synthetic import make_synthetic_featureset, make_synthetic_trials
 from sieeg.features.featureset import FeatureSet
+
+# A band centred on 10 Hz has the base -log10(10 / 10) = 0, so without effects its latent log power is exactly 0.
+ALPHA_ONLY = {"n_subjects": 1, "n_trials": 2, "bands": [("alpha", 8.0, 12.0)], "duration": 10.0, "seed": 4}
+NO_EFFECTS = {"emotion_effect": 0.0, "subject_offset": 0.0, "subject_style": 0.0, "noise": 0.0}
 
 
 def _valence_pattern(fs: FeatureSet) -> np.ndarray:
@@ -84,7 +89,6 @@ def test_trials_render_the_same_latent_model():
     np.testing.assert_array_equal([t.valence for t in trials], fs.valence)
     for trial in trials:
         assert trial.data.shape == (32, 2560) and trial.sfreq == 128.0 and trial.ch_names == list(BIOSEMI32_CHANNELS)
-        assert np.isclose(trial.data.std(), 20e-6)  # volts
     again = list(make_synthetic_trials(2, 3, sfreq=128.0, duration=20.0, **kwargs))
     np.testing.assert_array_equal(trials[-1].data, again[-1].data)
 
@@ -103,11 +107,49 @@ def test_a_reordered_or_reduced_montage_keeps_each_named_channel_and_band():
     np.testing.assert_array_equal(upper.band_power, full.pick_channels(channels).band_power)
 
 
-def test_raw_trials_of_a_reordered_montage_render_the_same_signals():
+def test_raw_trials_of_a_reordered_or_reduced_montage_render_the_same_signals():
     kwargs = {"n_subjects": 1, "n_trials": 2, "duration": 10.0, "seed": 5}
     full = list(make_synthetic_trials(**kwargs))
-    reversed_channels = list(BIOSEMI32_CHANNELS[::-1])
-    rev = list(make_synthetic_trials(channels=reversed_channels, **kwargs))
-    for a, b in zip(full, rev):
-        assert b.ch_names == reversed_channels
-        np.testing.assert_allclose(b.data[::-1] / b.data.std(), a.data / a.data.std())
+    channels = list(BIOSEMI32_CHANNELS[::-3])  # 11 of the 32 channels, in reverse order
+    part = list(make_synthetic_trials(channels=channels, **kwargs))
+    for a, b in zip(full, part):
+        assert b.ch_names == channels
+        # The signals as rendered, not re-normalised; numpy's FFT may round rows in SIMD groups differently.
+        np.testing.assert_allclose(b.data, a.data[::-3], rtol=0, atol=1e-12 * 20e-6)
+
+
+def test_amplitude_volts_is_the_rms_of_the_background():
+    """Without effects, a band centred on 10 Hz leaves the trials as the bare 1/f background."""
+    background = list(make_synthetic_trials(**ALPHA_ONLY, **NO_EFFECTS))
+    assert not np.any([t.meta["latent_log_power"] for t in background])
+    # 64 channel-trials of 10 s: the pooled RMS has a standard deviation of about 0.5 %.
+    np.testing.assert_allclose(np.sqrt(np.mean([t.data**2 for t in background])), 20e-6, rtol=0.03)
+    doubled = list(make_synthetic_trials(amplitude_volts=40e-6, **ALPHA_ONLY, **NO_EFFECTS))
+    np.testing.assert_array_equal(doubled[-1].data, 2.0 * background[-1].data)
+
+
+def test_latent_values_shift_the_power_inside_their_band_and_nothing_else():
+    """The gain is one constant, so a trial's latent values do not rescale the rest of its spectrum."""
+    freqs = np.fft.rfftfreq(1280, d=1.0 / 128.0)
+    in_band = (freqs >= 8.0) & (freqs < 12.0)
+    background = make_synthetic_trials(**ALPHA_ONLY, **NO_EFFECTS)
+    for reference, trial in zip(background, make_synthetic_trials(**ALPHA_ONLY)):  # the same white noise
+        ref_power, power = (np.abs(np.fft.rfft(t.data, axis=1)) ** 2 for t in (reference, trial))
+        np.testing.assert_allclose(power[:, ~in_band].sum(axis=1), ref_power[:, ~in_band].sum(axis=1), rtol=1e-9)
+        shift = np.log10(power[:, in_band].sum(axis=1) / ref_power[:, in_band].sum(axis=1))
+        np.testing.assert_allclose(shift, np.array(trial.meta["latent_log_power"])[:, 0], atol=1e-9)
+
+
+def test_a_numpy_integer_seed_gives_the_same_data_as_a_python_int(tmp_path):
+    """The streams are keyed by repr(); on numpy 2 repr(np.int64(4)) is 'np.int64(4)', not '4'."""
+    a, b = make_synthetic_featureset(2, 3, seed=4), make_synthetic_featureset(2, 3, seed=np.int64(4))
+    np.testing.assert_array_equal(a.band_power, b.band_power)
+    assert FeatureSet.load(b.save(tmp_path / "f.npz")).meta["seed"] == 4  # not the string "4"
+    kwargs = {"n_subjects": 1, "n_trials": 1, "duration": 2.0}
+    x, y = next(make_synthetic_trials(seed=4, **kwargs)), next(make_synthetic_trials(seed=np.int64(4), **kwargs))
+    np.testing.assert_array_equal(x.data, y.data)
+
+
+@pytest.mark.parametrize("seed", [None, [1, 2]])
+def test_any_seed_numpy_accepts_is_accepted(seed):
+    assert len(make_synthetic_featureset(2, 3, seed=seed)) == 6

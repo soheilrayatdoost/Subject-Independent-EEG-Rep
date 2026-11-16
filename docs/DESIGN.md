@@ -81,7 +81,8 @@ raw files --loader--> Trial (volts, cropped to stimulus)
   `train.learning_rate`, `train.epsilon`), `FRACTIONS` (in [0, 1): `features.welch_overlap`, `model.dropout`,
   `train.beta_1`, `train.beta_2`) and `CHOICES` (optimizer, lambda_schedule, selection_metric, class_weight, reference,
   interpolation, normalization, cross_per_subject, padding); `NON_EMPTY` lists (`features.channels`,
-  `features.bands`) need at least one entry, every band needs `0 <= low < high`, and
+  `features.bands`) need at least one entry, `features.channels` must not repeat a name ignoring case, `features.bands` must not repeat a band name (also
+  checked by `FeatureSet`), every band needs `0 <= low < high`, and
   `features.grid_size` must leave the encoder a non-empty feature map (each conv block ends with a 2x2 max-pooling,
   so the paper's two blocks need >= 4). `validate_config` applies the same checks to a configuration built in
   Python, where a number given as a string (`welch_segment_sec="15"`) is an error; the CLI re-validates after its
@@ -90,17 +91,22 @@ raw files --loader--> Trial (volts, cropped to stimulus)
   error a `ValueError` naming the file, line and column.
 - `sieeg.data.trial.Trial(dataset, subject, trial, data (n_ch, n_times) volts, sfreq, ch_names, valence, arousal, meta)`.
   A dataset name containing `:` is a `ValueError` here and in `FeatureSet` (`utils.check_dataset_name`).
+  So are channel names that are not unique ignoring case (`utils.check_channel_names`); `FeatureSet.pick_channels`
+  likewise rejects a channel requested twice.
 - `sieeg.features.featureset.FeatureSet(dataset, band_power (n, n_ch, n_bands) log10, subjects, trials, valence, arousal, ch_names, bands, meta)`
   with `subset`, `select_subjects`, `drop_subjects`, `pick_channels`, `subject_ids` (natural order), `qualified_subjects`,
   `labels(label, threshold)`, `has_rating`, `normalized('subject'|'none')`, `flat_features`, `save`, `load`; `zscore_by_group`.
 - `sieeg.data.synthetic`: `make_synthetic_featureset(...)`, `make_synthetic_trials(...)`. Every channel x band
   value is drawn from a stream keyed by the channel and band names, and the ratings from a stream of their own, so a
-  reordered or reduced montage gives every named channel the same data and the same ratings.
+  reordered or reduced montage gives every named channel the same data and the same ratings. Raw trials are scaled
+  by one gain set by `amplitude_volts` (the RMS of the 1/f background), `sfreq` and `duration`, so the rendered
+  signals of a named channel are the same in every montage too.
 - `sieeg.training.methods`: `AdversarySpec(kind in {group, identity, domain}, lam)`,
   `MethodSpec(name, description, adversaries)`, `get_method(name, lambda_subject=None, lambda_domain=None)`,
   `available_methods()`.
-- `sieeg.utils`: `natural_key`, `natural_sorted`, `check_dataset_name(dataset)` (`ValueError` if it contains `:`),
-  `qualify(dataset, subject)` = `"<dataset>:<subject>"`. Dataset names never contain `:` while subject ids may, so
+- `sieeg.utils`: `natural_key` (only decimal digits are numbers: "²" sorts as text), `natural_sorted`,
+  `check_dataset_name(dataset)` (`ValueError` if it contains `:`), `check_channel_names(names, what)` (`ValueError`
+  listing names equal under `str.lower()`, the folding every channel lookup uses), `qualify(dataset, subject)` = `"<dataset>:<subject>"`. Dataset names never contain `:` while subject ids may, so
   the first colon ends the dataset name and distinct (dataset, subject) pairs never collide.
 - `tests/conftest.py`: fixtures `tiny_config`, `small_featureset`, `source_target_featuresets`, `raw_trials`, `rng`.
 
@@ -143,6 +149,7 @@ def stimulus_window(status, sfreq, n_times, *, pad_sec=30.0, tol_sec=2.0) -> tup
 def load_session(session, *, channels=BIOSEMI32_CHANNELS, pad_sec=30.0, reader=None) -> Trial
     # reader(path) -> mne.io.BaseRaw; default mne.io.read_raw_bdf(path, preload=True, verbose="error").
     # Data = raw.get_data(picks=channels) [volts], cropped to [start, stop). Channel lookup is case-insensitive.
+    # A file whose channel names collide ignoring case is a ValueError (the session is skipped under on_error="warn").
     # Trial(dataset="mahnob", subject=session["subject"], trial=session["session"], ...,
     #       meta={"bdf": str, "media_file", "crop": method, "onset_sec", "offset_sec", "sfreq_file"}).
 def iter_mahnob_trials(root, *, channels=BIOSEMI32_CHANNELS, subjects=None, pad_sec=30.0,
@@ -163,7 +170,7 @@ returns an `mne.io.RawArray` with 32 EEG channels, a few extra channels, and a
 A CSV with one row per trial. Required columns: `subject, trial, path, valence, arousal`.
 Optional columns: `tmin, tmax` (seconds from file start, for cropping), `sfreq` and
 `ch_names` (`;`-separated, for array files), `array_key` (variable name in .npz/.mat),
-`transpose` (bool: the array is (n_times, n_ch)), and `scale` (multiplier to volts,
+`transpose` (1/true/yes or 0/false/no/empty: the array is (n_times, n_ch)), and `scale` (multiplier to volts,
 e.g. 1e-6 for µV). Relative paths are resolved against the manifest's directory.
 Several rows may point to the same file with different `tmin`/`tmax`. Cache the most
 recently opened file. Column names are exact (whitespace around them is removed). A known
@@ -172,10 +179,14 @@ fs/srate/sampling_rate -> sfreq, arraykey/key -> array_key, channels -> ch_names
 `ValueError` naming the expected column. Duplicate names, including names that differ only in
 surrounding whitespace, are a `ValueError`; they are checked on the header row as written, since
 pandas would read a repeated `tmin` as `tmin.1`. Any other column is ignored with one warning.
-Text cells (subject, trial, path, ch_names, array_key) are stripped and otherwise literal: `NA`
-or `None` is a value, and only an empty cell is missing (pandas' missing-value tokens apply to the
-numeric columns only). An empty rating means unrated; any other non-numeric rating is a
-`ValueError` naming the rows. Rows that read the same samples as an earlier row (same file, array variable and
+Every cell is read as written (`dtype=str, keep_default_na=False`) and normalised by one rule in
+`_check_manifest`, the same for a CSV file and a DataFrame. Text cells (subject, trial, path, ch_names,
+array_key) are stripped and otherwise literal: `NA` or `None` is a value, and only a blank cell is
+missing. In the other known columns (ratings, tmin, tmax, sfreq, scale, transpose) a blank cell or one
+of pandas' default missing-value tokens, in any letter case, is missing. A missing rating means
+unrated; any other non-numeric rating is a `ValueError` naming the rows. A malformed tmin / tmax /
+scale, or a malformed sfreq / transpose of an array file (MNE-readable files do not read these two),
+fails only its row. Rows that read the same samples as an earlier row (same file, array variable and
 crop) are reported in one warning.
 
 ```python
@@ -193,7 +204,8 @@ def iter_manifest_trials(manifest, *, dataset="daief", sfreq=None, ch_names=None
     # Arrays: sfreq / ch_names from the row, else from the file extras, else from the keyword defaults; error if unknown.
     # Precedence for scale: row > keyword > 1.0.
     # skipped (list): gets {"subject", "trial", "reason"} for every row skipped with on_error="warn".
-    # ValueError before any file is read if dataset contains ":".
+    # ValueError before any file is read if dataset contains ":", ch_names collide ignoring case, sfreq is not a
+    # positive number or scale is not a finite number other than 0 (a row's own scale cell: that row fails).
 ```
 
 ## 6. Features
@@ -227,8 +239,8 @@ def extract_features(trials, cfg, *, dataset=None, on_error="warn", progress=Tru
     # meta = {"feature_config": config_to_dict-like dict, "skipped": [...], "n_input_trials", "sieeg_version"}.
     # All trials must come from one dataset (subject ids are unique only within one): a trial of another dataset
     # than the first is a ValueError whatever on_error. The name is that dataset's, or dataset if given (a rename).
-    # ValueError up front if cfg.channels or cfg.bands is empty, dataset contains ":" or a band edge is above
-    # cfg.resample_sfreq / 2. loader_skipped: the
+    # ValueError up front if cfg.channels or cfg.bands is empty, cfg.channels repeats a name ignoring case,
+    # cfg.bands repeats a band name, dataset contains ":" or a band edge is above cfg.resample_sfreq / 2. loader_skipped: the
     # skipped list given to the loader, read after trials is exhausted; its records come first in meta["skipped"] and
     # count in meta["n_input_trials"].
 ```
@@ -246,6 +258,7 @@ class TopomapProjector:
     # positions_2d (n, 2); grid columns x = linspace(min X, max X, G); rows y = linspace(max Y, min Y, G)
     # (row 0 = anterior). One scipy Delaunay triangulation; method "cubic" -> CloughTocher2DInterpolator,
     # "linear" -> LinearNDInterpolator, both on the precomputed triangulation.
+    # ValueError if two channels share an electrode position (a repeated name, or aliases such as T3 / T7).
     mask: np.ndarray                               # (G, G) bool, True inside the electrodes' convex hull
     def transform(self, values) -> np.ndarray      # (..., n_ch) -> (..., G, G) float32; NaN -> fill_value.
                                                    # Vectorised: values reshaped to (n_ch, k), interpolated in chunks.
@@ -270,7 +283,11 @@ class GradientReversal(keras.layers.Layer):     # holds lam in a non-trainable s
 def build_encoder(input_shape, cfg: ModelConfig, name="encoder") -> keras.Model
     # for block in cfg.conv_blocks: Conv2D(f, kernel_size, padding, activation=conv_activation) per filter count,
     # then MaxPooling2D(2). Flatten, Dropout(cfg.dropout) if > 0, then Dense(u, activation=dense_activation)
-    # per cfg.dense_units. Default param count 574,528 for input (32, 32, 6).
+    # per cfg.dense_units. Default param count 574,528 for input (32, 32, 6). Every layer of the encoder and
+    # the heads, and AdversarialNet itself, is dtype float32, and the image layers are
+    # data_format="channels_last" (NHWC), whatever keras.config (image_data_format, floatx, dtype policy) says.
+    # The optimiser is the exception: Keras stores its learning rate in floatx, so floatx "float16" trains
+    # with 0.0020008 instead of 0.002 (float32, float64 and mixed_float16 are exact).
 def build_head(input_dim, n_outputs, *, hidden, activation, dropout=0.0, name) -> keras.Model
     # Dense(hidden, activation) [+ Dropout] -> Dense(n_outputs) logits; hidden == 0 -> just Dense(n_outputs).
 class AdversarialNet(keras.Model):
@@ -339,7 +356,8 @@ lam_k(step) = spec.lam * lambda_factor(step / total_steps, schedule)    # passed
 
 `group_labels` (float32, one per batch row, computed in NumPy) and `identity_alpha` (float32
 scalar) are inputs of the compiled step, so neither retraces it. The group head reads z
-itself because it sees every block; a third gradient path into z_S would make the float32
+itself because it sees every block, and heads that read the same rows (SIDANN's domain and
+identity heads) share one concat tensor; a third gradient path into z_S would make the float32
 gradient sums depend on the trace (not bit-reproducible). With a target pool the group
 adversary needs subject indices >= 0 for every out-group and target sample (`ValueError`).
 
@@ -451,11 +469,24 @@ fold seed; no emotion labels. Fold columns `probe_*`; `summary["probe"]` = means
 with finite values (None when off).
 
 `cfg.protocol.jobs > 1` runs folds in a `ProcessPoolExecutor` (spawn context) of
-`min(jobs, n_folds)` workers. Each worker sets TF intra-op threads to `max(1, cpu_count // workers)`
-and receives the shared arrays once, through the pool initializer. Splits, seeds, data and fold
-order equal `jobs=1`; the scores equal it up to float32 rounding, because TensorFlow's CPU kernels
-sum in an order that depends on the intra-op thread count (about 1e-7 in `p1` after a few
-epochs; such differences can grow over long training).
+`min(jobs, n_folds)` workers. Each worker enables memory growth on every GPU (by default TensorFlow
+reserves nearly all GPU memory for one process and the other workers fail with `cudaSetDevice() ...
+out of memory`), sets TF intra-op threads to `max(1, cpu_count // workers)` and receives the shared
+arrays once, through the pool initializer. A run of one fold trains in the calling process, which
+with `jobs > 1` also lets its GPU memory grow. A process that used the GPU before that (its own
+TensorFlow code, or an earlier `jobs=1` run) keeps nearly all GPU memory unless
+`TF_FORCE_GPU_ALLOW_GROWTH=true` is set, and leaves the workers the remainder. Splits, seeds, data
+and fold order equal `jobs=1`. On a CPU the scores equal it up to float32 rounding, because
+TensorFlow's CPU kernels sum in an order that depends on the intra-op thread count (about 1e-7 in
+`p1` after a few epochs; such differences can grow over long training). On a GPU the default
+kernels are not deterministic, so any two runs differ (about 1e-4 in `p1` after two epochs of a
+tiny model); with `TF_DETERMINISTIC_OPS=1` in the environment, which the workers inherit
+(TensorFlow settings made in the parent process are not inherited), runs are bit-identical and
+`jobs=N` equals `jobs=1` exactly. TensorFlow has deprecated the variable in favour of
+`tf.config.experimental.enable_op_determinism()`, which suffices for `jobs=1` if it is called before
+the process trains anything (called later, it does not make the following runs bit-identical); the
+variable is used because it is the only setting the workers inherit. This was checked with TensorFlow
+2.18 only; on a GPU the bit-for-bit tests fail under a version that ignores the variable.
 `summary` and `predictions` are built with `metrics.summarize_predictions`.
 
 ## 9. Experiment 1: `sieeg.analysis.bias`
@@ -546,13 +577,18 @@ scores, `probe_table`.
 
 `pytest` (configured in `pyproject.toml`; `-m "not slow"` skips end-to-end training).
 Every module has unit tests that use synthetic data only. Tests that train use
-`tiny_config`-sized models and at most a few epochs. Required checks include:
+`tiny_config`-sized models and at most a few epochs. `tests/conftest.py` sets
+`TF_FORCE_GPU_ALLOW_GROWTH=true`, `TF_DETERMINISTIC_OPS=1` and `NVIDIA_TF32_OVERRIDE=0` (unless already
+set) before TensorFlow starts, so on a GPU the suite and its worker processes run deterministic float32
+kernels; the bit-for-bit and tight-tolerance tests need both. Required checks include:
 GRL gradient sign and scale; encoder parameter count 574,528; LegacyNadam against a
 NumPy re-implementation of Keras-2 Nadam; Welch and band power on known sinusoids;
 the topomap reproducing values at electrode positions with the anterior side up;
 MAHNOB Status cropping with a fallback; manifest arrays vs MNE files; no test or target
-labels reaching the trainer; identical splits across methods; jobs=2 equal to jobs=1;
-CLI end to end on synthetic data. Also: exact per-head lambda wiring (one SGD(lr=1) step)
+labels reaching the trainer; identical splits across methods; jobs=2 equal to jobs=1; workers
+letting GPU memory grow; an encoder that stays channels-last under a `channels_first` Keras default;
+channel names colliding ignoring case rejected; manifest missing-value tokens in any letter case,
+the same for a CSV file and a DataFrame; CLI end to end on synthetic data. Also: exact per-head lambda wiring (one SGD(lr=1) step)
 and dropout on in the train step / off at inference; group labels across databases are not
 a function of the domain labels; within-database SINN weights the test subject like one
 training subject; prediction rows stay aligned on interleaved feature files with

@@ -171,7 +171,8 @@ class AdversarialTrainer:
 
         The batch is ``x = concat[S, pool blocks]`` with ``|S|`` rows per block; adversary k
         sees ``concat[z_S, *(block b for b in pool_of[k])]`` (no block: S only, i.e. identity
-        without a pool). The group head sees every block, so it reads z itself: no third
+        without a pool). The group head sees every block, so it reads z itself, and heads that
+        read the same rows share one concat tensor (SIDANN's domain and identity heads): no third
         gradient path into z_S whose summation order could vary between traces. Its labels come
         in as ``group_labels``, one per row of the batch (D14); ``identity_alpha`` is the weight
         of the identity pool's rows (D15).
@@ -192,11 +193,14 @@ class AdversarialTrainer:
                 metrics = {"loss_cls": loss_cls, "acc_cls": _accuracy(y, logits)}
                 total = loss_cls
                 ones = tf.ones_like(w)
+                rows = {(): z_s}  # pool blocks -> concat[z_S, blocks], one tensor per row set (heads share it)
                 for i, (kind, pool_blocks) in enumerate(zip(kinds, pool_of)):
                     if kind == "group":  # every block: rows S, O, T?
                         z_k = z
                     else:
-                        z_k = tf.concat([z_s, *(blocks[b] for b in pool_blocks)], axis=0) if pool_blocks else z_s
+                        if pool_blocks not in rows:
+                            rows[pool_blocks] = tf.concat([z_s, *(blocks[b] for b in pool_blocks)], axis=0)
+                        z_k = rows[pool_blocks]
                     logits_k = net.heads[kind](gradient_reversal(z_k, lams[i]), training=True)
                     if kind == "identity":
                         ce = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=subjects, logits=logits_k)

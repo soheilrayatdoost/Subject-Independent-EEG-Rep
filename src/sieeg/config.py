@@ -26,6 +26,8 @@ from typing import Any
 
 import yaml
 
+from .utils import check_band_names, check_channel_names
+
 #: The 32 EEG channels of the BioSemi-32 layout, in MAHNOB-HCI file order.
 #: Both databases contain these channels, so they are the default common montage.
 BIOSEMI32_CHANNELS: tuple[str, ...] = (
@@ -254,7 +256,8 @@ def validate_config(cfg: ExperimentConfig) -> ExperimentConfig:
     """Check every value of ``cfg``: its field type, the ranges and the choices.
 
     Numbers must be finite and within :data:`MINIMUMS`, :data:`POSITIVE` and :data:`FRACTIONS`,
-    options among :data:`CHOICES`; every band needs ``0 <= low < high``, and ``features.grid_size``
+    options among :data:`CHOICES`; every band needs ``0 <= low < high``, ``features.channels`` must
+    not repeat a name ignoring case, ``features.bands`` must not repeat a band name, and ``features.grid_size``
     must leave the encoder a non-empty feature map. Unlike a YAML file, a configuration built in
     Python must not give a number as a string (``welch_segment_sec="15"``); integers for floats
     and lists for tuples are fine. Returns ``cfg`` unchanged. Raises ``ValueError`` naming the
@@ -274,7 +277,10 @@ def validate_config(cfg: ExperimentConfig) -> ExperimentConfig:
             raise ValueError(f"{key} must be one of: {allowed}; got {value!r}")
         if key in NON_EMPTY and len(value) == 0:
             raise ValueError(f"{key} must not be empty")
+        if key == "features.channels":
+            check_channel_names(value, key)
         if key == "features.bands":
+            check_band_names(value, key)
             for i, band in enumerate(value):
                 if not 0 <= band[1] < band[2]:
                     raise ValueError(f"{key}[{i}] must have 0 <= low < high, got {band!r}")

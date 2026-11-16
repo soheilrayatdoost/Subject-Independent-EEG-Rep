@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from ..config import BIOSEMI32_CHANNELS
-from ..utils import natural_key, natural_sorted
+from ..utils import check_channel_names, natural_key, natural_sorted
 from .trial import Trial
 
 if TYPE_CHECKING:
@@ -201,9 +201,14 @@ def load_session(
 
     ``channels`` are looked up case-insensitively and returned in the given order and
     spelling. ``reader(path)`` returns an MNE raw (default: ``mne.io.read_raw_bdf``).
+
+    Raises:
+        ValueError: if two channel names of the file differ only in case.
+        KeyError: if the file lacks one of ``channels``.
     """
     bdf = Path(session["bdf"])
     raw = (reader or _read_bdf)(bdf)
+    check_channel_names(raw.ch_names, f"{bdf}: channel names")
     lookup = {name.lower(): name for name in raw.ch_names}
     missing = [c for c in channels if c.lower() not in lookup]
     if missing:
@@ -261,6 +266,7 @@ def iter_mahnob_trials(
     """
     if on_error not in ("warn", "raise"):
         raise ValueError(f"on_error must be 'warn' or 'raise', got {on_error!r}")
+    channels = check_channel_names(channels, "channels")
     no_bdf: list[dict[str, str]] = []
     sessions = find_rated_sessions(root, skipped=no_bdf, on_error=on_error)
     if subjects is not None:

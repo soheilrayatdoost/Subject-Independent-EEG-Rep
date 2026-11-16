@@ -86,19 +86,6 @@ def spy(monkeypatch):
     return log
 
 
-@pytest.fixture
-def op_determinism():
-    """TensorFlow op determinism for one test; the previous setting is restored afterwards."""
-    import tensorflow as tf
-    from tensorflow.python.framework import config as tf_config
-
-    enabled = tf_config.is_op_determinism_enabled()
-    tf.config.experimental.enable_op_determinism()
-    yield
-    if not enabled:
-        tf_config.disable_op_determinism()
-
-
 def assert_valid_run(run: RunResult, fs, label: str, fold_names: list[str], test_subjects: list[str], cfg) -> None:
     """Schema of docs/DESIGN.md 8.3; predictions and fold scores consistent with the test rows of ``fs``."""
     assert isinstance(run, RunResult)
@@ -606,8 +593,8 @@ def test_cross_database_run(tiny_config, source_target_featuresets, name, folds,
 
 
 @pytest.mark.parametrize("protocol", ["within", "cross"])
-def test_test_and_target_labels_never_reach_training(op_determinism, tiny_config, small_featureset,
-                                                     source_target_featuresets, protocol):
+def test_test_and_target_labels_never_reach_training(tiny_config, small_featureset, source_target_featuresets,
+                                                     protocol):
     """Permuting the ratings of the test subject (within) or of the target database (cross) changes the
     scores but not one predicted probability: those labels reach neither training nor model selection."""
     rng = np.random.default_rng(11)
@@ -727,7 +714,7 @@ def test_si_eeg_across_databases_is_no_dann_on_the_test_subject(monkeypatch, tin
     assert labels == {"B01": {1.0}, "B02": {0.0}, "B03": {0.0}}
 
 
-def test_subject_probe_after_training(op_determinism, tiny_config, small_featureset, tmp_path):
+def test_subject_probe_after_training(tiny_config, small_featureset, tmp_path):
     """protocol.subject_probe adds the probe scores (fractions) of every fold and their means; the probe
     runs after prediction, so the predictions do not change."""
     cfg = apply_overrides(tiny_config, ["protocol.n_val_subjects=2", "train.epochs=1"])
@@ -746,6 +733,61 @@ def test_subject_probe_after_training(op_determinism, tiny_config, small_feature
     assert load_run(save_run(on, tmp_path / "run")).summary["probe"] == on.summary["probe"]
 
 
+def test_workers_let_gpu_memory_grow_and_cap_their_threads(monkeypatch):
+    """Every worker initialises TensorFlow itself: by default the first would reserve nearly all the
+    memory of a GPU and the others could not create their CUDA context."""
+    import tensorflow as tf
+
+    calls = []
+    gpus = {"GPU": ["gpu0", "gpu1"]}
+    monkeypatch.setattr(tf.config, "list_physical_devices", lambda device_type=None: gpus.get(device_type, []))
+    monkeypatch.setattr(
+        tf.config.experimental, "set_memory_growth", lambda device, enable: calls.append(("growth", device, enable))
+    )
+    monkeypatch.setattr(
+        tf.config.threading, "set_intra_op_parallelism_threads",
+        lambda num_threads: calls.append(("threads", num_threads))
+    )
+    monkeypatch.setattr(protocols, "_worker_shared", None)  # restored after the test
+    shared = object()
+    protocols._init_worker(shared, 3)
+    assert sorted(calls) == [("growth", "gpu0", True), ("growth", "gpu1", True), ("threads", 3)]
+    assert protocols._worker_shared is shared
+
+
+def test_one_fold_of_a_parallel_run_lets_gpu_memory_grow(monkeypatch):
+    """With jobs > 1, a run of one fold trains in this process (sieeg cross --method dann,sida_eeg --jobs 4:
+    dann is one model). It must not reserve the GPU memory that the workers of the next run need."""
+    import tensorflow as tf
+
+    calls = []
+
+    def set_memory_growth(device, enable):
+        calls.append(("growth", device, enable))
+        if device == "initialised":
+            raise RuntimeError("Physical devices cannot be modified after being initialized")
+        if device == "capped":
+            raise ValueError("Cannot set memory growth on device when virtual devices configured")
+
+    gpus = ["gpu0"]
+    monkeypatch.setattr(tf.config, "list_physical_devices", lambda device_type=None: gpus)
+    monkeypatch.setattr(tf.config.experimental, "set_memory_growth", set_memory_growth)
+    monkeypatch.setattr(protocols, "_fit_fold", lambda shared, fold: calls.append(("fit", fold)) or fold)
+    assert list(protocols._fit_folds(None, ["fold"], 1)) == ["fold"]
+    assert calls == [("fit", "fold")]  # jobs=1: TensorFlow's default
+    calls.clear()
+    assert list(protocols._fit_folds(None, ["fold"], 4)) == ["fold"]
+    assert calls == [("growth", "gpu0", True), ("fit", "fold")]
+    calls.clear()
+    gpus[:] = ["initialised"]  # this process already uses its GPU: too late, but the fold still trains
+    assert list(protocols._fit_folds(None, ["fold"], 4)) == ["fold"]
+    assert calls == [("growth", "initialised", True), ("fit", "fold")]
+    calls.clear()
+    gpus[:] = ["capped"]  # set_logical_device_configuration already limited its memory: the fold still trains
+    assert list(protocols._fit_folds(None, ["fold"], 4)) == ["fold"]
+    assert calls == [("growth", "capped", True), ("fit", "fold")]
+
+
 @pytest.mark.slow
 def test_parallel_folds_match_sequential_folds(tiny_config, small_featureset):
     def run(jobs: int) -> RunResult:
@@ -753,8 +795,9 @@ def test_parallel_folds_match_sequential_folds(tiny_config, small_featureset):
         return run_within_database(small_featureset, "si_eeg", "valence", cfg, folds=["S01", "S04"], progress=False)
 
     sequential, parallel = run(1), run(2)
-    # Same splits, seeds, data and fold order. Workers run cpu_count // 2 intra-op threads, so
-    # float32 sums may round differently (about 1e-7); predicted classes must not change.
+    # Same splits, seeds, data and fold order. Workers run cpu_count // 2 intra-op threads, so on a CPU
+    # float32 sums may round differently (about 1e-7); predicted classes must not change. On a GPU the
+    # runs are this close only because conftest's TF_DETERMINISTIC_OPS=1 reaches the workers.
     np.testing.assert_array_equal(parallel.predictions["y_pred"], sequential.predictions["y_pred"])
     pd.testing.assert_frame_equal(parallel.predictions, sequential.predictions, check_exact=False, atol=1e-5)
     pd.testing.assert_frame_equal(

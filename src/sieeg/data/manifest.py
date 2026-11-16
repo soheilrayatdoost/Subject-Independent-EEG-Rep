@@ -19,10 +19,20 @@ Column names are exact, because an optional column that is not found silently fa
 to its default (the whole file, no scaling): a known column in another case or spelling
 (``Tmin``, ``Scale``, ``array key``) or a common alias (``onset``, ``fs``, ``channels`` ...)
 is an error naming the expected column, and so is a name given twice. Other columns are
-ignored with one warning. Whitespace around header names and text cells (``subject``,
-``trial``, ``path``, ...) is removed; text cells are otherwise literal (``NA`` or ``None`` is
-an id) and only an empty one is missing. An empty rating cell means "not rated"; any other
-non-numeric rating is an error.
+ignored with one warning.
+
+Every cell is read as written, without the whitespace around it (header names too), and one
+rule, the same for a CSV file and a DataFrame, says which cells are missing:
+
+* text cells (``subject``, ``trial``, ``path``, ``ch_names``, ``array_key``) are literal:
+  ``NA`` or ``None`` is an id, and only a blank cell is missing;
+* in the other columns (``valence``, ``arousal``, ``tmin``, ``tmax``, ``sfreq``, ``scale``,
+  ``transpose``) a blank cell or one of pandas' default missing-value markers (``NA``, ``N/A``,
+  ``#N/A``, ``NaN``, ``null``, ``None``, ...; in any letter case) is missing.
+
+A missing rating means "not rated"; any other non-numeric rating is an error for the whole
+manifest. A missing optional cell falls back to its default; a malformed one (``tmin=soon``,
+or ``transpose=maybe`` for an array file) fails only its row.
 
 Relative paths are relative to the manifest's folder. Several rows may share one file.
 """
@@ -30,6 +40,7 @@ Relative paths are relative to the manifest's folder. Several rows may share one
 from __future__ import annotations
 
 import logging
+import math
 import re
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -40,7 +51,7 @@ import numpy as np
 import pandas as pd
 import scipy.io
 
-from ..utils import check_dataset_name
+from ..utils import check_channel_names, check_dataset_name
 from .trial import Trial
 
 if TYPE_CHECKING:
@@ -59,8 +70,16 @@ COLUMN_ALIASES = {
     "channels": "ch_names",
 }
 ARRAY_SUFFIXES = (".npy", ".npz", ".mat")
-_TEXT_COLUMNS = ("subject", "trial", "path", "ch_names", "array_key")  # read literally ("01", "NA" are ids)
+_TEXT_COLUMNS = ("subject", "trial", "path", "ch_names", "array_key")  # literal: "01" and "NA" are ids
 _RATING_COLUMNS = ("valence", "arousal")
+_NUMBER_COLUMNS = ("tmin", "tmax", "sfreq", "scale")
+#: Lower-cased cells that mean "no value" in the non-text columns: a blank cell and pandas' default
+#: ``na_values``, which ``read_csv`` applied to these columns before. Kept here so that the rule depends
+#: on neither the pandas version nor the form of the manifest.
+_MISSING = frozenset({
+    "", "na", "n/a", "#n/a", "#n/a n/a", "#na", "<na>", "nan", "-nan", "null", "none",
+    "1.#ind", "-1.#ind", "1.#qnan", "-1.#qnan",
+})
 _FILE_EXTRAS = ("sfreq", "ch_names")  # metadata stored next to the EEG in .npz / .mat files
 _TRUE, _FALSE = ("1", "true", "yes"), ("0", "false", "no")
 
@@ -100,11 +119,25 @@ def _strip_text(value: Any) -> Any:
     return (value.strip() or np.nan) if isinstance(value, str) else value
 
 
+def _strip_value(value: Any) -> Any:
+    """A cell of a non-text column without surrounding whitespace; a blank one or a missing-value
+    token (``_MISSING``, in any letter case) becomes NaN."""
+    value = _strip_text(value)
+    return np.nan if isinstance(value, str) and value.lower() in _MISSING else value
+
+
+def _number(value: Any) -> Any:
+    """A cell as a float; a cell that is not a number is kept, and fails its row when the trial is read."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return value
+
+
 def _parse_ratings(values: pd.Series, column: str, source: object) -> pd.Series:
-    """Ratings as floats: an empty cell is NaN (not rated), any other non-numeric cell raises."""
+    """Ratings as floats: a missing cell is NaN (not rated), any other non-numeric cell raises."""
     parsed, bad = [], []
     for i, value in enumerate(values):
-        value = _strip_text(value)
         if pd.isna(value):
             parsed.append(np.nan)
             continue
@@ -122,22 +155,29 @@ def _parse_ratings(values: pd.Series, column: str, source: object) -> pd.Series:
 
 
 def _check_manifest(df: pd.DataFrame, source: object) -> pd.DataFrame:
-    """Validated copy of a manifest: column names, stripped header and text cells, numeric ratings."""
+    """Validated, normalised copy of a manifest: column names, stripped header and cells, missing cells
+    as NaN (text columns: blank only; the other known columns: blank or a ``_MISSING`` token), ratings
+    and ``tmin`` / ``tmax`` / ``sfreq`` / ``scale`` as floats."""
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
     _check_columns(list(df.columns), source)
     missing = [c for c in REQUIRED_COLUMNS if c not in df.columns]
     if missing:
         raise ValueError(f"Manifest {source} lacks required column(s) {missing}; required: {list(REQUIRED_COLUMNS)}")
-    for column in _TEXT_COLUMNS:
-        if column in df.columns:
+    for column in df.columns:
+        if column in _TEXT_COLUMNS:
             df[column] = df[column].map(_strip_text)
+        elif column in REQUIRED_COLUMNS + OPTIONAL_COLUMNS:
+            df[column] = df[column].map(_strip_value)
     blank = df[["subject", "trial", "path"]].isna().any(axis=1).to_numpy()
     if blank.any():
         rows = np.flatnonzero(blank).tolist()
         raise ValueError(f"Manifest {source}: rows {rows} (0-based) lack a subject, trial or path")
     for column in _RATING_COLUMNS:
         df[column] = _parse_ratings(df[column], column, source)
+    for column in _NUMBER_COLUMNS:
+        if column in df.columns:
+            df[column] = df[column].map(_number)
     return df
 
 
@@ -151,6 +191,9 @@ def _header(path: Path) -> list[str]:
 def read_manifest(path: str | Path) -> pd.DataFrame:
     """Read and validate a manifest CSV, keeping row order; ``path`` values become absolute.
 
+    Text columns hold stripped text (NaN if blank), ratings are floats, and ``tmin`` / ``tmax`` /
+    ``sfreq`` / ``scale`` are floats except a malformed cell, kept as text for its row to fail.
+
     Raises:
         ValueError: for a missing required column, a repeated column name, a misspelled or
             aliased known column, a row without subject, trial or path, or a non-numeric rating.
@@ -158,10 +201,8 @@ def read_manifest(path: str | Path) -> pd.DataFrame:
     path = Path(path)
     header = _header(path)
     _check_unique([name.strip() for name in header if name.strip()], path)  # so pandas renames no named column
-    # A converter keeps a text cell as written, so "NA" or "None" is an id (the python parser would
-    # still make it NaN); the other columns keep pandas' missing values.
-    literal = dict.fromkeys((name for name in header if name.strip() in _TEXT_COLUMNS), str)
-    df = _check_manifest(pd.read_csv(path, converters=literal, skipinitialspace=True, engine="c"), path)
+    # Every cell is read as written: which cells are missing is _check_manifest's rule, not pandas'.
+    df = _check_manifest(pd.read_csv(path, dtype=str, keep_default_na=False, skipinitialspace=True), path)
     base = path.resolve().parent
     df["path"] = [str(base / p) for p in df["path"]]  # an absolute p replaces base
     return df
@@ -256,7 +297,7 @@ def _open(path: Path, reader: Callable[[Path], mne.io.BaseRaw] | None) -> dict[s
 
 
 def _cell(row: Mapping[str, Any], name: str) -> Any:
-    """Value of an optional column; ``None`` if the column is absent or the cell is empty."""
+    """Value of an optional column; ``None`` if the column is absent or the cell is missing."""
     value = row.get(name)
     return None if value is None or pd.isna(value) else value
 
@@ -266,12 +307,14 @@ def _first(*values: Any) -> Any:
 
 
 def _as_bool(value: Any) -> bool:
-    if isinstance(value, str):
-        text = value.strip().lower()
-        if text not in _TRUE + _FALSE:
-            raise ValueError(f"transpose must be one of {_TRUE + _FALSE}, got {value!r}")
-        return text in _TRUE
-    return bool(value)
+    """A ``transpose`` cell (text, bool or number) as a bool; ``None``, no value, is false."""
+    if value is None:
+        return False
+    text = str(value).strip().lower()
+    text = {"1.0": "1", "0.0": "0"}.get(text, text)  # a 0 / 1 column with an empty cell is float in pandas
+    if text not in _TRUE + _FALSE:
+        raise ValueError(f"transpose must be one of {_TRUE + _FALSE}, got {value!r}")
+    return text in _TRUE
 
 
 def _split_names(text: Any) -> list[str] | None:
@@ -310,6 +353,8 @@ def _row_trial(
     else:  # MNE-readable: the file defines the sampling rate and the channels
         data, fs, names = variables["data"], variables["sfreq"], variables["ch_names"]
     fs = float(fs)
+    if not 0 < fs < math.inf:  # as the sfreq keyword: 0 would divide by zero below, inf makes no sense
+        raise ValueError(f"sfreq must be a positive number, got {fs!r}")
     tmin, tmax = _cell(row, "tmin"), _cell(row, "tmax")
     start = 0 if tmin is None else int(round(float(tmin) * fs))
     stop = data.shape[1] if tmax is None else int(round(float(tmax) * fs))
@@ -319,6 +364,8 @@ def _row_trial(
             f"the recording's {data.shape[1]} samples"
         )
     factor = float(_first(_cell(row, "scale"), scale, 1.0))
+    if not math.isfinite(factor) or factor == 0:  # 0 would turn the recording into a flat line
+        raise ValueError(f"scale must be a finite number other than 0, got {factor!r}")
     trial = Trial(
         dataset=dataset,
         subject=row["subject"],
@@ -346,12 +393,13 @@ def iter_manifest_trials(
 ) -> Iterator[Trial]:
     """Yield one :class:`Trial` per manifest row, in row order.
 
-    ``manifest`` is a CSV path or a frame from :func:`read_manifest` (a frame is validated
-    the same way, on a copy). MNE-readable files (.bdf .edf .gdf .fif .set .vhdr .cnt ...)
-    are opened with ``reader(path)`` (default ``mne.io.read_raw``) and keep only their EEG
-    channels; their sampling rate and channel names come from the file. For .npy / .npz /
-    .mat files they come from the row, else the file, else the ``sfreq`` / ``ch_names``
-    keywords. The data are multiplied by the row's ``scale``, else the keyword, else 1.0.
+    ``manifest`` is a CSV path or a frame from :func:`read_manifest` (a frame, whose cells
+    may be text or numbers, is validated and normalised by the same rule, on a copy).
+    MNE-readable files (.bdf .edf .gdf .fif .set .vhdr .cnt ...) are opened with
+    ``reader(path)`` (default ``mne.io.read_raw``) and keep only their EEG channels; their
+    sampling rate and channel names come from the file. For .npy / .npz / .mat files they
+    come from the row, else the file, else the ``sfreq`` / ``ch_names`` keywords. The data
+    are multiplied by the row's ``scale``, else the keyword, else 1.0.
     The most recently opened file is cached, so consecutive rows that share a file read it
     once. ``on_error="warn"`` logs and skips a failing row; ``"raise"`` re-raises the error.
     Every skipped row is appended to ``skipped`` (if given) as ``{"subject", "trial",
@@ -363,6 +411,12 @@ def iter_manifest_trials(
     if on_error not in ("warn", "raise"):
         raise ValueError(f"on_error must be 'warn' or 'raise', got {on_error!r}")
     dataset = check_dataset_name(dataset)  # a configuration error, not a failing row: before any file is read
+    if ch_names is not None:
+        ch_names = check_channel_names(ch_names, "ch_names")
+    if sfreq is not None and not 0 < float(sfreq) < math.inf:
+        raise ValueError(f"sfreq must be a positive number, got {sfreq!r}")
+    if scale is not None and not (math.isfinite(float(scale)) and float(scale) != 0):
+        raise ValueError(f"scale must be a finite number other than 0, got {scale!r}")
     if isinstance(manifest, pd.DataFrame):
         df = _check_manifest(manifest, "(DataFrame)")
     else:

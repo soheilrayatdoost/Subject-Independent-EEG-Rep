@@ -347,3 +347,30 @@ def test_unreadable_session_metadata_follows_on_error(mahnob_root: Path, caplog:
     assert [s["trial"] for s in only] == ["30", "40"]  # their subject is unknown, so they are always listed
     with pytest.raises(FileNotFoundError):  # a missing root is not a per-session error
         list(iter_mahnob_trials(mahnob_root / "missing", on_error="warn"))
+
+
+def test_channel_names_colliding_ignoring_case_fail_the_session(mahnob_root: Path) -> None:
+    """The case-insensitive lookup would keep the later of "CZ" and "cz", silently loading the wrong row."""
+
+    def reader(path: Path) -> mne.io.RawArray:
+        raw = make_raw()
+        if path.name == "Part_1_S_Trial5_emotion.bdf":
+            raw.rename_channels({"GSR1": "cz"})  # the file's EEG channel is spelled "CZ"
+        return raw
+
+    session = next(s for s in find_rated_sessions(mahnob_root) if s["session"] == "10")
+    message = r"Part_1_S_Trial5_emotion\.bdf: channel names must be unique ignoring case, got \['CZ', 'cz'\]"
+    with pytest.raises(ValueError, match=message):
+        load_session(session, reader=reader)
+    skipped: list[dict] = []
+    trials = list(iter_mahnob_trials(mahnob_root, reader=reader, skipped=skipped))
+    assert [t.trial for t in trials] == ["2", "22", "130"]
+    assert (skipped[-1]["subject"], skipped[-1]["trial"]) == ("1", "10")
+    assert skipped[-1]["reason"].startswith("ValueError: ") and "['CZ', 'cz']" in skipped[-1]["reason"]
+    with pytest.raises(ValueError, match=message):
+        list(iter_mahnob_trials(mahnob_root, reader=reader, on_error="raise"))
+
+
+def test_colliding_channels_are_rejected_before_any_session_is_read(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match=r"channels must be unique ignoring case, got \['Cz', 'CZ'\]"):
+        list(iter_mahnob_trials(tmp_path / "missing", channels=["Cz", "CZ"]))

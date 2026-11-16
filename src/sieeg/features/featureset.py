@@ -10,13 +10,13 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from ..utils import check_dataset_name, natural_sorted, qualify
+from ..utils import check_band_names, check_channel_names, check_dataset_name, natural_sorted, qualify
 
 FORMAT_VERSION = 1
 LABELS = ("valence", "arousal")
@@ -75,8 +75,8 @@ class FeatureSet:
         band_power: float32 array ``(n_trials, n_channels, n_bands)`` of log10 band power.
         subjects, trials: string arrays ``(n_trials,)``.
         valence, arousal: float32 ratings ``(n_trials,)``, NaN when missing.
-        ch_names: channel names (axis 1).
-        bands: ``(name, low_hz, high_hz)`` per band (axis 2).
+        ch_names: channel names (axis 1); unique ignoring case.
+        bands: ``(name, low_hz, high_hz)`` per band (axis 2); the names are unique.
         meta: JSON-serialisable provenance (extraction config, versions, ...).
     """
 
@@ -97,8 +97,9 @@ class FeatureSet:
         self.trials = np.asarray(self.trials).astype(str)
         self.valence = np.asarray(self.valence, dtype=np.float32)
         self.arousal = np.asarray(self.arousal, dtype=np.float32)
-        self.ch_names = [str(c) for c in self.ch_names]
+        self.ch_names = check_channel_names(self.ch_names)
         self.bands = [(str(b[0]), float(b[1]), float(b[2])) for b in self.bands]
+        check_band_names(self.bands)
         n = self.band_power.shape[0]
         if self.band_power.ndim != 3:
             raise ValueError(f"band_power must be (n_trials, n_channels, n_bands), got {self.band_power.shape}")
@@ -170,16 +171,20 @@ class FeatureSet:
         return self.subset(~np.isin(self.subjects, unwanted))
 
     def pick_channels(self, ch_names: Sequence[str]) -> FeatureSet:
-        """Keep (and reorder to) ``ch_names``; matching is case-insensitive."""
+        """Keep (and reorder to) ``ch_names``; matching is case-insensitive.
+
+        Raises:
+            KeyError: listing the requested channels the set lacks.
+            ValueError: if a channel is requested twice (ignoring case).
+        """
+        ch_names = check_channel_names(ch_names, "Requested channels")
         lookup = {c.lower(): i for i, c in enumerate(self.ch_names)}
         missing = [c for c in ch_names if c.lower() not in lookup]
         if missing:
             raise KeyError(f"Channels not in {self.dataset}: {missing}")
         idx = [lookup[c.lower()] for c in ch_names]
-        out = self.subset(slice(None))
-        out.band_power = self.band_power[:, idx, :]
-        out.ch_names = [self.ch_names[i] for i in idx]
-        return out
+        picked = [self.ch_names[i] for i in idx]
+        return replace(self, band_power=self.band_power[:, idx, :], ch_names=picked, meta=dict(self.meta))
 
     # ------------------------------------------------------------------ labels
     def ratings(self, label: str) -> np.ndarray:
@@ -248,14 +253,17 @@ class FeatureSet:
             if version != FORMAT_VERSION:
                 raise ValueError(f"{path}: feature format v{version}, expected v{FORMAT_VERSION}")
             edges = z["band_edges"]
-            return cls(
-                dataset=str(z["dataset"]),
-                band_power=z["band_power"],
-                subjects=z["subjects"],
-                trials=z["trials"],
-                valence=z["valence"],
-                arousal=z["arousal"],
-                ch_names=[str(c) for c in z["ch_names"]],
-                bands=[(str(n), float(lo), float(hi)) for n, (lo, hi) in zip(z["band_names"], edges)],
-                meta=json.loads(str(z["meta"])),
-            )
+            try:
+                return cls(
+                    dataset=str(z["dataset"]),
+                    band_power=z["band_power"],
+                    subjects=z["subjects"],
+                    trials=z["trials"],
+                    valence=z["valence"],
+                    arousal=z["arousal"],
+                    ch_names=[str(c) for c in z["ch_names"]],
+                    bands=[(str(n), float(lo), float(hi)) for n, (lo, hi) in zip(z["band_names"], edges)],
+                    meta=json.loads(str(z["meta"])),
+                )
+            except ValueError as err:  # name the file, as the format-version error does
+                raise ValueError(f"{path}: {err}") from err
