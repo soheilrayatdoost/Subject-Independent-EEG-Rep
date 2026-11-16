@@ -208,7 +208,7 @@ class FeatureSet:
         participant (paper, Sec. 5.3); ``"none"`` returns the raw log power.
         """
         if method == "subject":
-            flat = self.band_power.reshape(len(self), -1)
+            flat = self.band_power.reshape(len(self), self.n_channels * self.n_bands)  # -1 fails for 0 trials
             return zscore_by_group(flat, self.subjects).reshape(self.band_power.shape)
         if method == "none":
             return self.band_power.astype(np.float32, copy=True)
@@ -216,7 +216,7 @@ class FeatureSet:
 
     def flat_features(self, method: str = "subject") -> np.ndarray:
         """``(n_trials, n_channels * n_bands)`` matrix for classic classifiers."""
-        return self.normalized(method).reshape(len(self), -1)
+        return self.normalized(method).reshape(len(self), self.n_channels * self.n_bands)
 
     # ---------------------------------------------------------------------- io
     def save(self, path: str | Path) -> Path:

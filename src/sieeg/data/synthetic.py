@@ -11,6 +11,13 @@ Both generators share one latent model of per-trial log10 band power::
 * ``P_val, P_aro`` emotion patterns shared by every subject *and every dataset* (fixed
   seed), so cross-dataset transfer is possible; ``domain_shift`` perturbs them per dataset.
 * ``v[t], r[t]`` centred valence / arousal ratings ((rating - 5) / 2).
+* ``base`` a 1/f-like log power per band, ``-log10(band centre / 10 Hz)``.
+
+Every value that belongs to a channel and a band (patterns, offsets, styles, noise) is drawn
+from a random stream keyed by the channel and band *names* (case-insensitive channel names),
+and the per-trial scalars (ratings, gains, style amplitudes) come from a stream of their own.
+A reordered or reduced montage therefore gives each named channel the same data, and the
+same ratings, instead of re-assigning values by array position.
 
 :func:`make_synthetic_featureset` returns features directly (fast; used by model and
 protocol tests). :func:`make_synthetic_trials` renders the same latent model into raw
@@ -19,6 +26,7 @@ multichannel signals so the full extraction pipeline can be exercised.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterator, Sequence
 
 import numpy as np
@@ -30,15 +38,26 @@ from .trial import Trial
 _PATTERN_SEED = 20210606  # emotion patterns are shared across synthetic datasets
 
 
-def _unit(p: np.ndarray) -> np.ndarray:
-    return p / (np.sqrt(np.mean(p**2)) + 1e-12)
+def _keyed_rng(*key: object) -> np.random.Generator:
+    """A random stream fixed by ``key`` alone (stable across runs, platforms and orderings)."""
+    digest = hashlib.sha256(repr(key).encode("utf-8")).digest()
+    return np.random.default_rng(int.from_bytes(digest[:16], "little"))
+
+
+def _cell_draws(seed: int, stream: str, channels: Sequence[str], bands: Sequence[tuple], size: int) -> np.ndarray:
+    """``(n_channels, n_bands, size)`` standard-normal draws, each cell keyed by (channel, band) names."""
+    out = np.empty((len(channels), len(bands), size))
+    for i, channel in enumerate(channels):
+        for j, band in enumerate(bands):
+            out[i, j] = _keyed_rng(seed, stream, str(channel).lower(), str(band[0])).standard_normal(size)
+    return out
 
 
 def _latent_rows(
     n_subjects: int,
     n_trials: int,
-    n_channels: int,
-    n_bands: int,
+    channels: Sequence[str],
+    bands: Sequence[tuple[str, float, float]],
     *,
     emotion_effect: float,
     subject_offset: float,
@@ -48,23 +67,28 @@ def _latent_rows(
     seed: int,
     subject_prefix: str,
 ) -> list[tuple[str, str, float, float, np.ndarray]]:
-    pattern_rng = np.random.default_rng(_PATTERN_SEED)
-    p_val = _unit(pattern_rng.standard_normal((n_channels, n_bands)))
-    p_aro = _unit(pattern_rng.standard_normal((n_channels, n_bands)))
-
-    rng = np.random.default_rng(seed)
+    # Entries are iid N(0, 1), so every pattern has unit RMS in expectation; re-normalising over
+    # the requested subset would rescale a reduced montage.
+    patterns = _cell_draws(_PATTERN_SEED, "emotion", channels, bands, 2)
+    p_val, p_aro = patterns[..., 0], patterns[..., 1]
+    # Per cell: 3 dataset values, then per subject an offset and a style value, then per trial a noise value.
+    cells = _cell_draws(seed, "dataset", channels, bands, 3 + 2 * n_subjects + n_subjects * n_trials)
     if domain_shift > 0:
-        p_val = _unit(p_val + domain_shift * rng.standard_normal(p_val.shape))
-        p_aro = _unit(p_aro + domain_shift * rng.standard_normal(p_aro.shape))
-        domain = domain_shift * rng.standard_normal((n_channels, n_bands))
+        scale = np.sqrt(1.0 + domain_shift**2)  # keeps the patterns' expected unit RMS
+        p_val = (p_val + domain_shift * cells[..., 0]) / scale
+        p_aro = (p_aro + domain_shift * cells[..., 1]) / scale
+        domain = domain_shift * cells[..., 2]
     else:
-        domain = np.zeros((n_channels, n_bands))
-    base = np.tile(np.linspace(1.0, -1.0, n_bands), (n_channels, 1))
+        domain = np.zeros((len(channels), len(bands)))
+    centres = np.array([(lo + hi) / 2.0 for _, lo, hi in bands], dtype=np.float64)
+    base = np.broadcast_to(-np.log10(centres / 10.0), domain.shape)
+    offsets = cells[..., 3 : 3 + n_subjects]
+    styles = cells[..., 3 + n_subjects : 3 + 2 * n_subjects]
+    noises = cells[..., 3 + 2 * n_subjects :]
 
+    rng = np.random.default_rng(seed)  # per-trial scalars only, so they do not depend on the montage
     rows = []
     for s in range(n_subjects):
-        offset = subject_offset * rng.standard_normal((n_channels, n_bands))
-        style = _unit(rng.standard_normal((n_channels, n_bands)))
         gain = rng.uniform(0.6, 1.4)
         for t in range(n_trials):
             val = int(rng.integers(1, 10))
@@ -73,11 +97,11 @@ def _latent_rows(
             a = subject_style * rng.standard_normal()
             x = (
                 base
-                + offset
-                + a * style
+                + subject_offset * offsets[..., s]
+                + a * styles[..., s]
                 + gain * emotion_effect * (v * p_val + r * p_aro)
                 + domain
-                + noise * rng.standard_normal((n_channels, n_bands))
+                + noise * noises[..., s * n_trials + t]
             )
             rows.append((f"{subject_prefix}{s + 1:02d}", f"T{t + 1:02d}", float(val), float(aro), x))
     return rows
@@ -102,8 +126,8 @@ def make_synthetic_featureset(
     rows = _latent_rows(
         n_subjects,
         n_trials,
-        len(channels),
-        len(bands),
+        channels,
+        bands,
         emotion_effect=emotion_effect,
         subject_offset=subject_offset,
         subject_style=subject_style,
@@ -158,13 +182,14 @@ def make_synthetic_trials(
     Each channel is pink-ish Gaussian noise whose spectrum is scaled inside every
     band by ``10 ** (x / 2)`` (amplitude), so log10 band power shifts by ``x``
     relative to the 1/f background. Overlapping bands (slow alpha within alpha)
-    multiply their gains.
+    multiply their gains. Each channel's white noise comes from a stream keyed by its name,
+    so a reordered or reduced montage renders the same signal for every named channel.
     """
     rows = _latent_rows(
         n_subjects,
         n_trials,
-        len(channels),
-        len(bands),
+        channels,
+        bands,
         emotion_effect=emotion_effect,
         subject_offset=subject_offset,
         subject_style=subject_style,
@@ -176,9 +201,10 @@ def make_synthetic_trials(
     n_times = int(round(duration * sfreq))
     freqs = np.fft.rfftfreq(n_times, d=1.0 / sfreq)
     pink = 1.0 / np.sqrt(np.maximum(freqs, 1.0))
-    signal_rng = np.random.default_rng(seed + 1)
+    signal_rngs = [_keyed_rng(seed, "signal", str(channel).lower()) for channel in channels]
     for subject, trial, val, aro, x in rows:
-        spec = np.fft.rfft(signal_rng.standard_normal((len(channels), n_times)), axis=1) * pink
+        white = np.stack([rng.standard_normal(n_times) for rng in signal_rngs])
+        spec = np.fft.rfft(white, axis=1) * pink
         for b, (_, lo, hi) in enumerate(bands):
             in_band = (freqs >= lo) & (freqs < hi)
             spec[:, in_band] *= (10.0 ** (x[:, b] / 2.0))[:, None]

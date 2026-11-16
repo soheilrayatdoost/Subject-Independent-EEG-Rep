@@ -80,7 +80,8 @@ raw files --loader--> Trial (volts, cropped to stimulus)
   `protocol.jobs`), `POSITIVE` (> 0: `features.resample_sfreq`, `features.h_freq`, `features.welch_segment_sec`,
   `train.learning_rate`, `train.epsilon`), `FRACTIONS` (in [0, 1): `features.welch_overlap`, `model.dropout`,
   `train.beta_1`, `train.beta_2`) and `CHOICES` (optimizer, lambda_schedule, selection_metric, class_weight, reference,
-  interpolation, normalization, cross_per_subject, padding); every band needs `0 <= low < high`, and
+  interpolation, normalization, cross_per_subject, padding); `NON_EMPTY` lists (`features.channels`,
+  `features.bands`) need at least one entry, every band needs `0 <= low < high`, and
   `features.grid_size` must leave the encoder a non-empty feature map (each conv block ends with a 2x2 max-pooling,
   so the paper's two blocks need >= 4). `validate_config` applies the same checks to a configuration built in
   Python, where a number given as a string (`welch_segment_sec="15"`) is an error; the CLI re-validates after its
@@ -92,7 +93,9 @@ raw files --loader--> Trial (volts, cropped to stimulus)
 - `sieeg.features.featureset.FeatureSet(dataset, band_power (n, n_ch, n_bands) log10, subjects, trials, valence, arousal, ch_names, bands, meta)`
   with `subset`, `select_subjects`, `drop_subjects`, `pick_channels`, `subject_ids` (natural order), `qualified_subjects`,
   `labels(label, threshold)`, `has_rating`, `normalized('subject'|'none')`, `flat_features`, `save`, `load`; `zscore_by_group`.
-- `sieeg.data.synthetic`: `make_synthetic_featureset(...)`, `make_synthetic_trials(...)`.
+- `sieeg.data.synthetic`: `make_synthetic_featureset(...)`, `make_synthetic_trials(...)`. Every channel x band
+  value is drawn from a stream keyed by the channel and band names, and the ratings from a stream of their own, so a
+  reordered or reduced montage gives every named channel the same data and the same ratings.
 - `sieeg.training.methods`: `AdversarySpec(kind in {group, identity, domain}, lam)`,
   `MethodSpec(name, description, adversaries)`, `get_method(name, lambda_subject=None, lambda_domain=None)`,
   `available_methods()`.
@@ -125,10 +128,13 @@ the documentation disagrees (256 vs 512 Hz).
 def parse_session_xml(path) -> dict | None
     # rated emotion session -> {"session", "subject", "valence", "arousal", "media_file", "exp_type", "cut_nr", "xml"}
     # unrated / tagging session -> None. Values from attributes; ratings as float.
-def find_rated_sessions(root, *, skipped=None) -> list[dict]
+def find_rated_sessions(root, *, skipped=None, on_error="raise") -> list[dict]
     # adds "bdf" (Path; prefer *_emotion.bdf, else the single *.bdf). Skips folders without a BDF
     # (log one summary warning with the count). Sorted by (natural subject, natural session).
     # Rated sessions without a BDF are appended to skipped as {"subject", "trial": session, "reason"}.
+    # A session whose metadata cannot be read (malformed XML, rated without <subject id>, non-numeric rating,
+    # several candidate BDFs) raises with on_error="raise"; with "warn" it is logged and appended to skipped,
+    # with subject UNKNOWN_SUBJECT ("unknown") if the XML gave none. A missing sessions folder always raises.
 def stimulus_window(status, sfreq, n_times, *, pad_sec=30.0, tol_sec=2.0) -> tuple[int, int, str]
     # (start, stop, method). method "status": the first two 0->1 transitions of (status & 0xFFFF & 16),
     # accepted only if start/sfreq is within tol_sec of pad_sec AND (n_times - stop)/sfreq is within
@@ -141,9 +147,10 @@ def load_session(session, *, channels=BIOSEMI32_CHANNELS, pad_sec=30.0, reader=N
     #       meta={"bdf": str, "media_file", "crop": method, "onset_sec", "offset_sec", "sfreq_file"}).
 def iter_mahnob_trials(root, *, channels=BIOSEMI32_CHANNELS, subjects=None, pad_sec=30.0,
                        reader=None, on_error="warn", skipped=None) -> Iterator[Trial]
-    # on_error: "warn" (log and skip the session) or "raise".
+    # on_error: "warn" (log and skip the session) or "raise"; it applies to reading the metadata too.
     # skipped (list): gets {"subject", "trial": session id, "reason"} for every dropped rated session of the
-    # selected subjects (no BDF, load error); complete once the iterator is exhausted.
+    # selected subjects (no BDF, unreadable metadata, load error) and for every unreadable session of an unknown
+    # subject; complete once the iterator is exhausted.
 ```
 
 Tests must not need real data. Build a fake `Sessions/` tree with `session.xml` files
@@ -220,7 +227,8 @@ def extract_features(trials, cfg, *, dataset=None, on_error="warn", progress=Tru
     # meta = {"feature_config": config_to_dict-like dict, "skipped": [...], "n_input_trials", "sieeg_version"}.
     # All trials must come from one dataset (subject ids are unique only within one): a trial of another dataset
     # than the first is a ValueError whatever on_error. The name is that dataset's, or dataset if given (a rename).
-    # ValueError up front if dataset contains ":" or a band edge is above cfg.resample_sfreq / 2. loader_skipped: the
+    # ValueError up front if cfg.channels or cfg.bands is empty, dataset contains ":" or a band edge is above
+    # cfg.resample_sfreq / 2. loader_skipped: the
     # skipped list given to the loader, read after trials is exhausted; its records come first in meta["skipped"] and
     # count in meta["n_input_trials"].
 ```

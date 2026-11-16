@@ -169,6 +169,9 @@ POSITIVE: tuple[str, ...] = (
 #: Number keys that must lie in [0, 1).
 FRACTIONS: tuple[str, ...] = ("features.welch_overlap", "model.dropout", "train.beta_1", "train.beta_2")
 
+#: List keys that need at least one entry: without channels or bands there is no feature to extract.
+NON_EMPTY: tuple[str, ...] = ("features.channels", "features.bands")
+
 _SCALARS = {bool: "true or false", int: "an integer", float: "a finite number", str: "a string"}
 
 
@@ -269,6 +272,8 @@ def validate_config(cfg: ExperimentConfig) -> ExperimentConfig:
         if key in CHOICES and value not in CHOICES[key]:
             allowed = ", ".join("null" if choice is None else choice for choice in CHOICES[key])
             raise ValueError(f"{key} must be one of: {allowed}; got {value!r}")
+        if key in NON_EMPTY and len(value) == 0:
+            raise ValueError(f"{key} must not be empty")
         if key == "features.bands":
             for i, band in enumerate(value):
                 if not 0 <= band[1] < band[2]:

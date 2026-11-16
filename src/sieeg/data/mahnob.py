@@ -83,30 +83,52 @@ def _session_order(session: Mapping[str, Any]) -> tuple:
     return natural_key(session["subject"]), session["subject"], natural_key(session["session"]), session["session"]
 
 
+#: Subject id recorded in ``skipped`` for a session whose ``session.xml`` cannot be read.
+UNKNOWN_SUBJECT = "unknown"
+
+
 def find_rated_sessions(
-    root: str | Path, *, skipped: list[dict[str, str]] | None = None
+    root: str | Path, *, skipped: list[dict[str, str]] | None = None, on_error: str = "raise"
 ) -> list[dict[str, Any]]:
     """Rated emotion sessions that have a BDF, sorted by (subject, session) in natural order.
 
-    ``root`` is the database folder or its ``Sessions`` folder. Each dict from
-    :func:`parse_session_xml` gains ``"bdf"`` (a :class:`~pathlib.Path`). Rated sessions
-    without a BDF (missing physiology) are skipped with one summary warning and appended to
-    ``skipped`` (if given) as ``{"subject", "trial" (the session id), "reason"}``.
+    ``root`` is the database folder or its ``Sessions`` folder; a missing folder always raises.
+    Each dict from :func:`parse_session_xml` gains ``"bdf"`` (a :class:`~pathlib.Path`). Rated
+    sessions without a BDF (missing physiology) are skipped with one summary warning and
+    appended to ``skipped`` (if given) as ``{"subject", "trial" (the session id), "reason"}``.
+    A session whose metadata cannot be read (malformed ``session.xml``, a rated session
+    without ``<subject id>`` or with a non-numeric rating, several candidate BDF files) raises
+    with ``on_error="raise"``; with ``"warn"`` it is logged, skipped and appended to
+    ``skipped`` too, with subject :data:`UNKNOWN_SUBJECT` if the XML gave none.
     """
+    if on_error not in ("warn", "raise"):
+        raise ValueError(f"on_error must be 'warn' or 'raise', got {on_error!r}")
     root = Path(root)
     sessions_dir = root / "Sessions" if (root / "Sessions").is_dir() else root
     if not sessions_dir.is_dir():
         raise FileNotFoundError(f"MAHNOB-HCI sessions folder not found: {sessions_dir}")
-    sessions, no_bdf = [], []
+    sessions, no_bdf, unreadable = [], [], []
     for xml in sessions_dir.glob("*/session.xml"):
-        info = parse_session_xml(xml)
-        if info is None:
+        info = None
+        try:
+            info = parse_session_xml(xml)
+            if info is None:
+                continue
+            bdf = _find_bdf(xml.parent)
+        except (ET.ParseError, ValueError, OSError) as err:  # one bad session, not a bad root
+            if on_error == "raise":
+                raise
+            subject = info["subject"] if info else UNKNOWN_SUBJECT
+            logger.warning("Skipping MAHNOB-HCI session %s: cannot read its metadata: %s", xml.parent.name, err)
+            unreadable.append({"subject": subject, "trial": xml.parent.name, "reason": f"{type(err).__name__}: {err}"})
             continue
-        bdf = _find_bdf(xml.parent)
         if bdf is None:
             no_bdf.append(info)
         else:
             sessions.append({**info, "bdf": bdf})
+    if skipped is not None:
+        unreadable.sort(key=lambda s: (natural_key(s["trial"]), s["trial"]))
+        skipped.extend(unreadable)
     if no_bdf:
         no_bdf.sort(key=_session_order)
         logger.warning(
@@ -230,23 +252,24 @@ def iter_mahnob_trials(
     """Yield every rated MAHNOB-HCI emotion trial under ``root`` (paper Sec. 3).
 
     ``subjects`` keeps only those subject ids. ``on_error="warn"`` logs and skips a
-    session that fails to load; ``"raise"`` re-raises the error. Rated sessions of the
-    selected subjects that are dropped, those without a BDF and those that fail to load, are
-    appended to ``skipped`` (if given) as ``{"subject", "trial" (the session id), "reason"}``,
-    for ``extract_features(..., loader_skipped=skipped)``; the list is complete once the
-    iterator is exhausted.
+    session whose metadata cannot be read or that fails to load; ``"raise"`` re-raises the
+    error. A missing sessions folder always raises. Rated sessions of the selected subjects
+    that are dropped (without a BDF, unreadable, failing to load) are appended to ``skipped``
+    (if given) as ``{"subject", "trial" (the session id), "reason"}``, for
+    ``extract_features(..., loader_skipped=skipped)``; the list is complete once the iterator
+    is exhausted. Unreadable sessions whose subject is unknown are always listed.
     """
     if on_error not in ("warn", "raise"):
         raise ValueError(f"on_error must be 'warn' or 'raise', got {on_error!r}")
     no_bdf: list[dict[str, str]] = []
-    sessions = find_rated_sessions(root, skipped=no_bdf)
+    sessions = find_rated_sessions(root, skipped=no_bdf, on_error=on_error)
     if subjects is not None:
         wanted = {subjects} if isinstance(subjects, str) else {str(s) for s in subjects}  # "12" is one subject
         absent = wanted - {s["subject"] for s in sessions}
         if absent:
             logger.warning("No rated MAHNOB-HCI sessions for subjects %s", ", ".join(natural_sorted(absent)))
         sessions = [s for s in sessions if s["subject"] in wanted]
-        no_bdf = [s for s in no_bdf if s["subject"] in wanted]
+        no_bdf = [s for s in no_bdf if s["subject"] in wanted or s["subject"] == UNKNOWN_SUBJECT]
     if skipped is not None:
         skipped.extend(no_bdf)
     n_loaded = 0

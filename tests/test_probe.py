@@ -62,3 +62,9 @@ def test_group_probe_is_deterministic_and_handles_tiny_groups(rng):
     z_in, z_out = rng.normal(size=(50, 4)), rng.normal(size=(10, 4)) + 1.0
     assert group_probe(z_in, z_out, seed=3) == group_probe(z_in, z_out, seed=3)
     assert math.isnan(group_probe(z_in, z_out[:1])["group_bacc"])
+
+
+def test_empty_selection_gives_nan_like_a_single_subject():
+    out = subject_probe(np.empty((0, 4)), np.array([], dtype=str))
+    assert math.isnan(out["subject_acc"]) and math.isnan(out["subject_chance"]) and out["n_subjects"] == 0
+    assert math.isnan(group_probe(np.empty((0, 4)), np.ones((5, 4)))["group_bacc"])

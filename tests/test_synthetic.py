@@ -87,3 +87,27 @@ def test_trials_render_the_same_latent_model():
         assert np.isclose(trial.data.std(), 20e-6)  # volts
     again = list(make_synthetic_trials(2, 3, sfreq=128.0, duration=20.0, **kwargs))
     np.testing.assert_array_equal(trials[-1].data, again[-1].data)
+
+
+def test_a_reordered_or_reduced_montage_keeps_each_named_channel_and_band():
+    """Values follow channel / band names, not array positions, so montages can be aligned by name."""
+    full = make_synthetic_featureset(n_subjects=4, n_trials=5, seed=3)
+    channels, bands = list(BIOSEMI32_CHANNELS[::-3]), list(PAPER_BANDS[::-1])
+    part = make_synthetic_featureset(n_subjects=4, n_trials=5, seed=3, channels=channels, bands=bands)
+    np.testing.assert_array_equal(part.valence, full.valence)  # the ratings do not depend on the montage
+    np.testing.assert_array_equal(part.arousal, full.arousal)
+    order = [full.band_names.index(name) for name in part.band_names]
+    np.testing.assert_array_equal(part.band_power, full.pick_channels(channels).band_power[:, :, order])
+    # Channel names are matched case-insensitively, as everywhere else in sieeg.
+    upper = make_synthetic_featureset(n_subjects=4, n_trials=5, seed=3, channels=[c.upper() for c in channels])
+    np.testing.assert_array_equal(upper.band_power, full.pick_channels(channels).band_power)
+
+
+def test_raw_trials_of_a_reordered_montage_render_the_same_signals():
+    kwargs = {"n_subjects": 1, "n_trials": 2, "duration": 10.0, "seed": 5}
+    full = list(make_synthetic_trials(**kwargs))
+    reversed_channels = list(BIOSEMI32_CHANNELS[::-1])
+    rev = list(make_synthetic_trials(channels=reversed_channels, **kwargs))
+    for a, b in zip(full, rev):
+        assert b.ch_names == reversed_channels
+        np.testing.assert_allclose(b.data[::-1] / b.data.std(), a.data / a.data.std())

@@ -30,10 +30,12 @@ def _probe_model(seed: int) -> object:
 
 
 def _cv_predict(z: np.ndarray, labels: np.ndarray, n_splits: int, seed: int) -> np.ndarray | None:
-    """Out-of-fold predictions, or None if some class has fewer than 2 samples."""
+    """Out-of-fold predictions, or None with fewer than 2 classes (none included) or a class of 1 sample."""
     _, counts = np.unique(labels, return_counts=True)
+    if len(counts) < 2:  # before counts.min(), which fails on an empty selection
+        return None
     folds = int(min(n_splits, counts.min()))
-    if len(counts) < 2 or folds < 2:
+    if folds < 2:
         return None
     cv = StratifiedKFold(n_splits=folds, shuffle=True, random_state=seed)
     return cross_val_predict(_probe_model(seed), z, labels, cv=cv)
@@ -48,8 +50,8 @@ def subject_probe(z: np.ndarray, subjects: np.ndarray, *, n_splits: int = 5, see
 
     Returns:
         ``{"subject_acc", "subject_chance", "n_subjects"}``. Accuracy and chance (the
-        majority-subject rate) are fractions; both are NaN with fewer than 2 subjects or
-        fewer than 2 trials in some subject.
+        majority-subject rate) are fractions; both are NaN with fewer than 2 subjects (an
+        empty selection included) or fewer than 2 trials in some subject.
     """
     z = np.asarray(z, dtype=np.float64)
     subjects = np.asarray(subjects)

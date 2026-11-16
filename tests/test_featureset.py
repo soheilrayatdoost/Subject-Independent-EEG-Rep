@@ -237,3 +237,12 @@ def test_feature_config_differences():
     assert feature_config_differences(a, b) == ["average-reference channel sets differ (32 vs 30 channels)"]
     b.meta["feature_config"] = config_to_dict(FeatureConfig(channels=BIOSEMI32_CHANNELS[:30], reference=None))
     assert feature_config_differences(a, b) == ["reference: a='average' vs b=None"]  # channels: 'average' only
+
+
+def test_an_empty_selection_normalises_and_flattens_to_empty_arrays(small_featureset):
+    fs = small_featureset
+    empty = fs.subset(np.zeros(len(fs), dtype=bool))
+    assert len(empty) == 0
+    for method in ("subject", "none"):
+        assert empty.normalized(method).shape == (0, fs.n_channels, fs.n_bands)
+        assert empty.flat_features(method).shape == (0, fs.n_channels * fs.n_bands)

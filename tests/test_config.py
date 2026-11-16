@@ -274,6 +274,22 @@ def test_choices_match_the_modules_that_use_them():
         lambda_factor(0.5, schedule)  # accepted
 
 
+@pytest.mark.parametrize("key", ["features.channels", "features.bands"])
+def test_empty_channel_or_band_lists_are_rejected_before_any_data_is_read(key):
+    with pytest.raises(ValueError, match=rf"{re.escape(key)} must not be empty"):
+        apply_overrides(ExperimentConfig(), [f"{key}=[]"])
+    cfg = ExperimentConfig()
+    built = dataclasses.replace(cfg, features=dataclasses.replace(cfg.features, **{key.split(".")[1]: ()}))
+    with pytest.raises(ValueError, match=rf"{re.escape(key)} must not be empty"):
+        validate_config(built)
+
+
+def test_empty_layer_lists_stay_valid():
+    """No dense layer (z = flattened conv maps) or no conv block (dense layers on the image) still trains."""
+    cfg = apply_overrides(ExperimentConfig(), ["model.dense_units=[]", "model.conv_blocks=[]"])
+    assert (cfg.model.dense_units, cfg.model.conv_blocks) == ((), ())
+
+
 def test_validate_config_checks_a_config_built_in_python():
     cfg = ExperimentConfig()
     assert validate_config(cfg) is cfg

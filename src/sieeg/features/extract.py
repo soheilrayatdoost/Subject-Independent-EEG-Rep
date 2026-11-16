@@ -135,13 +135,17 @@ def extract_features(
     ``progress`` logs every extracted trial at INFO level.
 
     Raises:
-        ValueError: if ``on_error`` is unknown, ``dataset`` contains ``":"``, a band reaches above
-            the Nyquist frequency of ``cfg.resample_sfreq``, a trial comes from another dataset
-            than the first (whatever ``on_error``), or no trial yields features.
+        ValueError: if ``on_error`` is unknown, ``cfg.channels`` or ``cfg.bands`` is empty,
+            ``dataset`` contains ``":"``, a band reaches above the Nyquist frequency of
+            ``cfg.resample_sfreq``, a trial comes from another dataset than the first (whatever
+            ``on_error``), or no trial yields features.
     """
     if on_error not in ("warn", "raise"):
         raise ValueError(f"on_error must be 'warn' or 'raise', got {on_error!r}")
     # Configuration errors: fail before reading any trial.
+    for key in ("channels", "bands"):
+        if not getattr(cfg, key):
+            raise ValueError(f"features.{key} must not be empty")
     if dataset is not None:
         dataset = check_dataset_name(dataset)
     if cfg.resample_sfreq is not None:

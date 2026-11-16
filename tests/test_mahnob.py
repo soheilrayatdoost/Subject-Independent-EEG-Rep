@@ -9,6 +9,7 @@ plus 16-pulses at stimulus onset and offset.
 from __future__ import annotations
 
 import logging
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import mne
@@ -315,3 +316,34 @@ def test_iter_mahnob_trials_reports_skipped_sessions(mahnob_root: Path) -> None:
     only = []
     assert len(list(iter_mahnob_trials(mahnob_root, subjects=["10"], reader=FakeReader(), skipped=only))) == 1
     assert only == []  # subject 2's session without a BDF was not asked for
+
+
+def test_unreadable_session_metadata_follows_on_error(mahnob_root: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """One bad session.xml must not abort the extraction of every other session with on_error="warn"."""
+    sessions = mahnob_root / "Sessions"
+    (sessions / "30").mkdir()
+    (sessions / "30" / "session.xml").write_text('<session feltVlnc="7" feltArsl="3"><subject id="3"/>', "utf-8")
+    write_session(sessions, "40", subject=" ", ratings=(6, 4), bdf="Part_4_S_Trial1_emotion.bdf")  # no subject id
+    write_session(sessions, "50", subject="5", ratings=(6, 4), bdf="Part_5_S_Trial1_emotion.bdf")
+    (sessions / "50" / "Part_5_S_Trial2_emotion.bdf").write_bytes(b"")  # two candidate BDF files
+
+    with pytest.raises((ET.ParseError, ValueError)):
+        list(iter_mahnob_trials(mahnob_root, reader=FakeReader(), on_error="raise"))
+    with pytest.raises((ET.ParseError, ValueError)):
+        find_rated_sessions(mahnob_root)  # the default is on_error="raise", as before
+
+    skipped: list[dict] = []
+    with caplog.at_level(logging.WARNING, logger="sieeg.data.mahnob"):
+        trials = list(iter_mahnob_trials(mahnob_root, reader=FakeReader(), skipped=skipped))
+    assert [t.trial for t in trials] == [session for _, session in LOADABLE]
+    assert [(s["subject"], s["trial"]) for s in skipped] == [("unknown", "30"), ("unknown", "40"), ("5", "50"), ("2", "24")]
+    assert skipped[0]["reason"].startswith("ParseError: ")
+    assert skipped[1]["reason"].startswith("ValueError: ") and "without <subject id" in skipped[1]["reason"]
+    assert "cannot choose between BDF files" in skipped[2]["reason"]
+    assert "Skipping MAHNOB-HCI session 30: cannot read its metadata" in caplog.text
+
+    only: list[dict] = []
+    assert [t.trial for t in iter_mahnob_trials(mahnob_root, subjects=["10"], reader=FakeReader(), skipped=only)] == ["130"]
+    assert [s["trial"] for s in only] == ["30", "40"]  # their subject is unknown, so they are always listed
+    with pytest.raises(FileNotFoundError):  # a missing root is not a per-session error
+        list(iter_mahnob_trials(mahnob_root / "missing", on_error="warn"))

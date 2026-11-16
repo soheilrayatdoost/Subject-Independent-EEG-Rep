@@ -281,3 +281,13 @@ def test_bands_above_the_recorded_nyquist_frequency_are_rejected_after_upsamplin
         extract_features([*raw_trials, slow], cfg, on_error="raise", progress=False)
     at_limit = _trial(CHANNELS, rng, sfreq=90.0, seconds=20.0)  # 45 Hz = the recording's Nyquist frequency
     assert trial_band_power(at_limit, cfg).shape == (32, 6)
+
+
+@pytest.mark.parametrize("field", ["channels", "bands"])
+def test_empty_channels_or_bands_fail_before_any_trial_is_read(field):
+    def trials():
+        raise AssertionError("no trial may be read")
+        yield  # pragma: no cover - makes this a generator
+
+    with pytest.raises(ValueError, match=rf"features\.{field} must not be empty"):
+        extract_features(trials(), FeatureConfig(**{field: ()}), progress=False)

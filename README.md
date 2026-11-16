@@ -81,7 +81,7 @@ MAHNOB-HCI/
 sieeg extract mahnob /data/MAHNOB-HCI --out features/mahnob.npz     # --subjects 1,2 extracts a subset
 ```
 
-Only rated emotion sessions (`session.xml` has `feltVlnc` and `feltArsl`) are used; sessions without a BDF file are skipped with a warning and listed as skipped in the feature file.
+Only rated emotion sessions (`session.xml` has `feltVlnc` and `feltArsl`) are used; sessions without a BDF file, and sessions whose `session.xml` cannot be read, are skipped with a warning and listed as skipped in the feature file, so one damaged session does not stop the extraction.
 Each trial is cropped to the stimulus using the `Status` channel (rising edges of the trigger bit with value 16); if those markers are missing or implausible, the 30 s recorded before and after each clip are cut off instead (`--pad-sec`).
 
 ### DAI-EF, or any other dataset, through a manifest
